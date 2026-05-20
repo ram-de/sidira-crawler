@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+.python-version
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Crawler outputs (local-only artifacts; production writes to R2)
+outputs/
+.playwright/
+playwright-report/
+test-results/
+
+# Secrets / customer config
+.env
+.env.*
+!.env.example
+config/customers/*.yaml
+!config/customers/example_customer.yaml
+
+# Coverage / test
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/

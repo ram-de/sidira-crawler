@@ -1,0 +1,36 @@
+# Example customer config — duplicate this file as <customer_id>.yaml and edit.
+# Real customer files are gitignored.
+
+customer_id: example
+sandbox_base_url: https://sandbox.example.com
+
+capabilities:
+  - name: reorder
+    entry_points:
+      - /home
+      - /orders
+    roles:
+      - guest
+      - member
+      - dashpass_member
+    max_hops: 3
+
+  - name: checkout
+    entry_points:
+      - /cart
+    roles:
+      - guest
+      - member
+      - dashpass_member
+    max_hops: 3
+
+role_credentials:
+  - role: guest
+    env_var_user: EXAMPLE_GUEST_USER
+    env_var_password: EXAMPLE_GUEST_PASSWORD
+  - role: member
+    env_var_user: EXAMPLE_MEMBER_USER
+    env_var_password: EXAMPLE_MEMBER_PASSWORD
+  - role: dashpass_member
+    env_var_user: EXAMPLE_DASHPASS_USER
+    env_var_password: EXAMPLE_DASHPASS_PASSWORD

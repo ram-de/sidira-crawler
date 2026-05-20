@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pythia-crawler"
+version = "0.1.0"
+description = "Weekly product crawler that produces versioned Feature Packs (reverse-PRD + reverse-Figma per capability) for the Pythia simulation engine"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.44",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "click>=8.1",
+    "anthropic>=0.25",
+    "openai>=1.30",
+    "boto3>=1.34",
+    "httpx>=0.27",
+    "tenacity>=8.2",
+    "structlog>=24.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "black>=24.4",
+    "ipykernel",
+]
+
+[project.scripts]
+pythia-crawler = "pythia_crawler.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["pythia_crawler*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
