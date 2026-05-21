@@ -1,0 +1,142 @@
+{
+  "screens": [
+    {
+      "id": "cart",
+      "name": "Cart",
+      "role": null,
+      "components": [
+        {
+          "id": "cart.checkout_button",
+          "role": "button",
+          "text": "Checkout",
+          "states": [
+            {"name": "default", "text": "Checkout"},
+            {"name": "disabled", "text": "Cart is empty"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "checkout_auth_gate",
+      "name": "Auth gate",
+      "role": "guest",
+      "components": [
+        {
+          "id": "auth_gate.sign_in",
+          "role": "button",
+          "text": "Sign in",
+          "states": [{"name": "default"}]
+        },
+        {
+          "id": "auth_gate.continue_guest",
+          "role": "button",
+          "text": "Continue as guest",
+          "states": [{"name": "default"}]
+        }
+      ]
+    },
+    {
+      "id": "checkout_contact",
+      "name": "Contact",
+      "role": "guest",
+      "components": [
+        {"id": "contact.email", "role": "input", "text": "Email", "states": [{"name": "default"}, {"name": "error"}]},
+        {"id": "contact.phone", "role": "input", "text": "Phone", "states": [{"name": "default"}, {"name": "error"}]},
+        {"id": "contact.continue", "role": "button", "text": "Continue", "states": [{"name": "default"}, {"name": "disabled"}]}
+      ]
+    },
+    {
+      "id": "checkout_payment",
+      "name": "Payment",
+      "role": "guest",
+      "components": [
+        {"id": "payment.card_input", "role": "input", "text": "Card number", "states": [{"name": "default"}, {"name": "error", "text": "Invalid card"}]},
+        {"id": "payment.continue", "role": "button", "text": "Continue", "states": [{"name": "default"}, {"name": "loading"}]}
+      ]
+    },
+    {
+      "id": "checkout_review",
+      "name": "Review",
+      "role": null,
+      "components": [
+        {
+          "id": "review.itemized_total",
+          "role": "list",
+          "text": "Subtotal / Delivery / Service / Tax / Tip",
+          "states": [{"name": "default"}]
+        },
+        {
+          "id": "review.fee_row",
+          "role": "list_item",
+          "text": "Delivery fee",
+          "states": [
+            {"name": "default", "text": "$3.99"},
+            {
+              "name": "waived",
+              "text": "$0.00 (Premium)",
+              "annotations": {"visible_to_roles": "premium_member"}
+            }
+          ]
+        },
+        {
+          "id": "review.tip_selector",
+          "role": "selector",
+          "text": "Tip: 15% / 18% / 20% / Custom",
+          "states": [{"name": "default", "text": "18% selected"}]
+        },
+        {
+          "id": "review.payment_method",
+          "role": "row",
+          "text": "Saved payment method with Change link",
+          "visible_to_roles": ["member", "premium_member"],
+          "states": [{"name": "default"}]
+        },
+        {
+          "id": "review.unavailable_banner",
+          "role": "banner",
+          "text": "1 item is no longer available — your total has changed.",
+          "annotations": {"condition": "any cart item became unavailable"},
+          "states": [{"name": "default"}, {"name": "dismissed"}]
+        },
+        {
+          "id": "review.place_order",
+          "role": "button",
+          "text": "Place order",
+          "states": [
+            {"name": "default", "text": "Place order"},
+            {"name": "disabled", "text": "This restaurant doesn't deliver to your address."},
+            {"name": "loading", "text": "Placing..."}
+          ]
+        },
+        {
+          "id": "review.quick_place",
+          "role": "button",
+          "text": "Quick place",
+          "visible_to_roles": ["premium_member"],
+          "annotations": {"condition": "order total ≤ $50"},
+          "states": [{"name": "default"}, {"name": "loading"}]
+        }
+      ]
+    },
+    {
+      "id": "order_confirmation",
+      "name": "Confirmation",
+      "role": null,
+      "components": [
+        {"id": "confirmation.order_id", "role": "text", "text": "Order #{id}", "states": [{"name": "default"}]},
+        {"id": "confirmation.eta", "role": "text", "text": "Arriving by {time}", "states": [{"name": "default"}]},
+        {"id": "confirmation.itemized_recap", "role": "list", "text": "Items and totals recap", "states": [{"name": "default"}]}
+      ]
+    }
+  ],
+  "transitions": [
+    {"trigger": "tap cart.checkout_button", "from_screen": "cart", "to_screen": "checkout_auth_gate", "role_gated": ["guest"]},
+    {"trigger": "tap cart.checkout_button", "from_screen": "cart", "to_screen": "checkout_review", "role_gated": ["member", "premium_member"]},
+    {"trigger": "tap auth_gate.sign_in", "from_screen": "checkout_auth_gate", "to_screen": "auth_login", "role_gated": ["guest"]},
+    {"trigger": "tap auth_gate.continue_guest", "from_screen": "checkout_auth_gate", "to_screen": "checkout_contact", "role_gated": ["guest"]},
+    {"trigger": "tap contact.continue", "from_screen": "checkout_contact", "to_screen": "checkout_payment", "role_gated": ["guest"]},
+    {"trigger": "tap payment.continue", "from_screen": "checkout_payment", "to_screen": "checkout_review", "role_gated": ["guest"]},
+    {"trigger": "tap review.place_order", "from_screen": "checkout_review", "to_screen": "order_confirmation"},
+    {"trigger": "tap review.quick_place", "from_screen": "checkout_review", "to_screen": "order_confirmation", "role_gated": ["premium_member"]}
+  ]
+}

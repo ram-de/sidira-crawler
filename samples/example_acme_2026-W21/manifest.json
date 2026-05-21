@@ -1,0 +1,20 @@
+{
+  "customer_id": "acme",
+  "snapshot_version": "2026-W21",
+  "generated_at": "2026-05-20T18:00:00Z",
+  "schema_version": "1.0",
+  "capabilities": [
+    "reorder",
+    "checkout"
+  ],
+  "crawl_metadata": {
+    "crawler_version": "0.1.0",
+    "sandbox_base_url": "https://sandbox.acme-eats.example.com",
+    "roles_walked": "guest,member,premium_member",
+    "duration_seconds": "412",
+    "screens_observed": "27",
+    "transitions_observed": "63",
+    "llm_provider": "groq",
+    "llm_model": "llama-3.3-70b-versatile"
+  }
+}

@@ -1,0 +1,178 @@
+{
+  "screens": [
+    {
+      "id": "home",
+      "name": "Home",
+      "role": null,
+      "components": [
+        {
+          "id": "home.order_again_rail",
+          "role": "carousel",
+          "text": "Order Again",
+          "visible_to_roles": ["member", "premium_member"],
+          "states": [
+            {"name": "default", "text": "Order Again"},
+            {"name": "empty", "text": "Sign in to see your past orders."}
+          ]
+        },
+        {
+          "id": "home.order_again_tile",
+          "role": "card",
+          "text": "Past order tile (merchant name, 2 item thumbnails, total price)",
+          "visible_to_roles": ["member", "premium_member"],
+          "states": [
+            {"name": "default"},
+            {"name": "loading", "text": "Loading items..."}
+          ]
+        },
+        {
+          "id": "home.accelerator_tile",
+          "role": "card",
+          "text": "Reorder your usual from {merchant}",
+          "visible_to_roles": ["premium_member"],
+          "states": [
+            {"name": "default"}
+          ]
+        },
+        {
+          "id": "home.signin_cta",
+          "role": "button",
+          "text": "Sign in",
+          "visible_to_roles": ["guest"],
+          "states": [
+            {"name": "default", "text": "Sign in"},
+            {"name": "pressed"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reorder_review",
+      "name": "Reorder review",
+      "role": "member",
+      "components": [
+        {
+          "id": "review.item_list",
+          "role": "list",
+          "text": "Previously ordered items with current prices",
+          "states": [
+            {"name": "default"},
+            {"name": "item_sold_out", "text": "Sold out"}
+          ]
+        },
+        {
+          "id": "review.address_editor",
+          "role": "input",
+          "text": "Deliver to: {address}",
+          "states": [
+            {"name": "default"},
+            {"name": "editing"}
+          ]
+        },
+        {
+          "id": "review.add_to_cart_button",
+          "role": "button",
+          "text": "Add to cart",
+          "states": [
+            {"name": "default", "text": "Add to cart"},
+            {
+              "name": "disabled",
+              "text": "None of these items are available right now.",
+              "annotations": {
+                "condition": "all items unavailable"
+              }
+            },
+            {"name": "loading", "text": "Adding..."}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "auth_login",
+      "name": "Sign in",
+      "role": "guest",
+      "components": [
+        {
+          "id": "login.email_input",
+          "role": "input",
+          "text": "Email",
+          "states": [{"name": "default"}, {"name": "error", "text": "Invalid email"}]
+        },
+        {
+          "id": "login.password_input",
+          "role": "input",
+          "text": "Password",
+          "states": [{"name": "default"}, {"name": "error", "text": "Incorrect password"}]
+        },
+        {
+          "id": "login.submit",
+          "role": "button",
+          "text": "Sign in",
+          "states": [{"name": "default"}, {"name": "loading", "text": "Signing in..."}]
+        }
+      ]
+    },
+    {
+      "id": "cart",
+      "name": "Cart",
+      "role": null,
+      "components": [
+        {
+          "id": "cart.line_item",
+          "role": "list_item",
+          "text": "Cart line item: name, qty, price",
+          "states": [{"name": "default"}, {"name": "removing"}]
+        },
+        {
+          "id": "cart.delivery_fee_chip",
+          "role": "chip",
+          "text": "Delivery fee preview",
+          "visible_to_roles": ["guest", "member"],
+          "states": [{"name": "default"}]
+        },
+        {
+          "id": "cart.undo_banner",
+          "role": "banner",
+          "text": "Reordered — Undo (4s)",
+          "visible_to_roles": ["premium_member"],
+          "annotations": {
+            "condition": "shown only on accelerated path"
+          },
+          "states": [{"name": "default"}, {"name": "dismissed"}]
+        }
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "trigger": "tap home.signin_cta",
+      "from_screen": "home",
+      "to_screen": "auth_login",
+      "role_gated": ["guest"]
+    },
+    {
+      "trigger": "successful auth on login.submit",
+      "from_screen": "auth_login",
+      "to_screen": "home",
+      "role_gated": ["guest"]
+    },
+    {
+      "trigger": "tap home.order_again_tile",
+      "from_screen": "home",
+      "to_screen": "reorder_review",
+      "role_gated": ["member", "premium_member"]
+    },
+    {
+      "trigger": "tap home.accelerator_tile",
+      "from_screen": "home",
+      "to_screen": "cart",
+      "role_gated": ["premium_member"]
+    },
+    {
+      "trigger": "tap review.add_to_cart_button",
+      "from_screen": "reorder_review",
+      "to_screen": "cart",
+      "role_gated": ["member", "premium_member"]
+    }
+  ]
+}

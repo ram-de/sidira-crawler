@@ -1,0 +1,41 @@
+{
+  "customer_id": "acme",
+  "snapshot_version": "2026-W21",
+  "prior_snapshot": "2026-W20",
+  "summary": "2 capabilities changed, 1 capability unchanged.",
+  "changes": [
+    {
+      "capability": "reorder",
+      "change_type": "component_added",
+      "screen": "home",
+      "component": "home.accelerator_tile",
+      "details": "New tile 'Reorder your usual from {merchant}' added for premium_member role. Previously, premium_member saw the same Order Again rail as member.",
+      "first_observed_in": "2026-W21"
+    },
+    {
+      "capability": "reorder",
+      "change_type": "transition_added",
+      "details": "New transition: home → cart via home.accelerator_tile (role_gated to premium_member). Skips the reorder_review screen entirely.",
+      "first_observed_in": "2026-W21"
+    },
+    {
+      "capability": "checkout",
+      "change_type": "component_modified",
+      "screen": "checkout_review",
+      "component": "review.fee_row",
+      "details": "New state 'waived' added — shows '$0.00 (Premium)' for premium_member role. Previously fee was always shown at face value with no role variation.",
+      "first_observed_in": "2026-W21"
+    },
+    {
+      "capability": "checkout",
+      "change_type": "component_added",
+      "screen": "checkout_review",
+      "component": "review.quick_place",
+      "details": "New 'Quick place' button surfaced for premium_member when order total ≤ $50.",
+      "first_observed_in": "2026-W21"
+    }
+  ],
+  "unchanged_capabilities": [
+    "search"
+  ]
+}
