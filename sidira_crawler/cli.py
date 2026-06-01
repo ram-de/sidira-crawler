@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import click
 
-from pythia_crawler import __version__
-from pythia_crawler.crawler import run_crawl
+from sidira_crawler import __version__
+from sidira_crawler.crawler import run_crawl
 
 
 @click.group()
 @click.version_option(__version__)
 def cli() -> None:
-    """pythia-crawler — Feature Pack producer for the Pythia simulation engine."""
+    """sidira-crawler — Feature Pack producer for the Sidira simulation engine."""
 
 
 @cli.command()

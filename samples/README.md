@@ -3,7 +3,7 @@
 Example Feature Pack outputs for fictional customers. Used as:
 1. Documentation of the artifact shape (what the simulator will consume)
 2. Fixtures for tests that don't want to invoke a real crawl
-3. Reference for `pythia-simulator` developers building the read path
+3. Reference for `sidira-simulator` developers building the read path
 
 | Sample | Customer | Snapshot | Capabilities |
 |---|---|---|---|

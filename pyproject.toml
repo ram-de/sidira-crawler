@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pythia-crawler"
+name = "sidira-crawler"
 version = "0.1.0"
-description = "Weekly product crawler that produces versioned Feature Packs (reverse-PRD + reverse-Figma per capability) for the Pythia simulation engine"
+description = "Weekly product crawler that produces versioned Feature Packs (reverse-PRD + reverse-Figma per capability) for the Sidira simulation engine"
 requires-python = ">=3.11"
 dependencies = [
     "playwright>=1.44",
@@ -30,10 +30,10 @@ dev = [
 ]
 
 [project.scripts]
-pythia-crawler = "pythia_crawler.cli:cli"
+sidira-crawler = "sidira_crawler.cli:cli"
 
 [tool.setuptools.packages.find]
-include = ["pythia_crawler*"]
+include = ["sidira_crawler*"]
 
 [tool.ruff]
 line-length = 100

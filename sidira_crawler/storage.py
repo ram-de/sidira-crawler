@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Protocol
 
-from pythia_crawler.schema import FeaturePack
+from sidira_crawler.schema import FeaturePack
 
 
 class ArtifactStore(Protocol):

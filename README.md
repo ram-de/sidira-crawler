@@ -1,8 +1,8 @@
-# pythia-crawler
+# sidira-crawler
 
-Weekly product crawler that produces versioned **Feature Packs** for the Pythia simulation engine.
+Weekly product crawler that produces versioned **Feature Packs** for the Sidira simulation engine.
 
-A Feature Pack is a structured snapshot of how a customer's product works *today* — captured in the same shape PMs use to describe new features (PRD + Figma). The Pythia simulator consumes Feature Packs alongside Persona Packs and a PM's hypothesis to validate experiments before they're built.
+A Feature Pack is a structured snapshot of how a customer's product works *today* — captured in the same shape PMs use to describe new features (PRD + Figma). The Sidira simulator consumes Feature Packs alongside Persona Packs and a PM's hypothesis to validate experiments before they're built.
 
 ## What it produces
 
@@ -15,16 +15,16 @@ Plus a pack-level manifest, snapshot version, and a diff against the prior week.
 
 See [`docs/feature-pack-crawler-spec.md`](docs/feature-pack-crawler-spec.md) for the full design.
 
-## Subsystem in the Pythia architecture
+## Subsystem in the Sidira architecture
 
 ```
-pythia-personas/    → Persona Pack
-pythia-crawler/     → Feature Pack     ← this repo
+sidira-personas/    → Persona Pack
+sidira-crawler/     → Feature Pack     ← this repo
                                        ↓ both consumed by ↓
-                       pythia-simulator (mirofish-inspired UI)
+                       sidira-simulator (mirofish-inspired UI)
 ```
 
-All three producers write to a shared artifact store (Cloudflare R2); the simulator reads from there. See `docs/pythia-system-architecture.md` in the personal wiki for the full picture.
+All three producers write to a shared artifact store (Cloudflare R2); the simulator reads from there. See `docs/sidira-system-architecture.md` in the personal wiki for the full picture.
 
 ## Install
 
@@ -38,13 +38,13 @@ playwright install chromium
 ### As a CLI (cron / standalone)
 
 ```bash
-pythia-crawler run --customer acme --snapshot 2026-W21
+sidira-crawler run --customer acme --snapshot 2026-W21
 ```
 
 ### As a library (imported by simulator workers)
 
 ```python
-from pythia_crawler import run_crawl
+from sidira_crawler import run_crawl
 
 artifact_uri = run_crawl(customer_id="acme", snapshot_version="2026-W21")
 ```

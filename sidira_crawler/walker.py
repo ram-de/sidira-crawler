@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from pythia_crawler.config import CapabilityConfig
+from sidira_crawler.config import CapabilityConfig
 
 
 @dataclass

@@ -6,8 +6,8 @@ ReverseFigma model: screens, components, states, copy, transitions, role-gating.
 
 from __future__ import annotations
 
-from pythia_crawler.schema import ReverseFigma
-from pythia_crawler.walker import RawWalk
+from sidira_crawler.schema import ReverseFigma
+from sidira_crawler.walker import RawWalk
 
 
 def synthesize_reverse_figma(

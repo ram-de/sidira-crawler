@@ -8,16 +8,16 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from pythia_crawler import __version__
-from pythia_crawler.cli import cli
-from pythia_crawler.config import load_customer_config
-from pythia_crawler.schema import (
+from sidira_crawler import __version__
+from sidira_crawler.cli import cli
+from sidira_crawler.config import load_customer_config
+from sidira_crawler.schema import (
     Capability,
     FeaturePack,
     FeaturePackManifest,
     ReverseFigma,
 )
-from pythia_crawler.storage import LocalArtifactStore
+from sidira_crawler.storage import LocalArtifactStore
 
 
 def test_version_constant() -> None:

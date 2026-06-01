@@ -1,6 +1,6 @@
 """LLM client with provider preference: Groq → Anthropic → fallback.
 
-Mirrors the pattern used in pythia-personas so credentials and behavior stay
+Mirrors the pattern used in sidira-personas so credentials and behavior stay
 consistent across producers.
 """
 

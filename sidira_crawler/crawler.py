@@ -16,13 +16,13 @@ from pathlib import Path
 
 import structlog
 
-from pythia_crawler.config import load_customer_config
-from pythia_crawler.llm import get_client
-from pythia_crawler.schema import Capability, FeaturePack, FeaturePackManifest, ReverseFigma
-from pythia_crawler.storage import get_store, write_diff
-from pythia_crawler.synthesis.figma import synthesize_reverse_figma
-from pythia_crawler.synthesis.prd import synthesize_reverse_prd
-from pythia_crawler.walker import RawWalk, walk_capability
+from sidira_crawler.config import load_customer_config
+from sidira_crawler.llm import get_client
+from sidira_crawler.schema import Capability, FeaturePack, FeaturePackManifest, ReverseFigma
+from sidira_crawler.storage import get_store, write_diff
+from sidira_crawler.synthesis.figma import synthesize_reverse_figma
+from sidira_crawler.synthesis.prd import synthesize_reverse_prd
+from sidira_crawler.walker import RawWalk, walk_capability
 
 log = structlog.get_logger()
 

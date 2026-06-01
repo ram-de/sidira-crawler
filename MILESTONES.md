@@ -1,13 +1,13 @@
-# pythia-crawler — Milestones
+# sidira-crawler — Milestones
 
 **Note:** This file is now a redirect. As of 2026-05-21, planning consolidated into the simulator repo (which is the integration point for all three repos).
 
 | What | Where |
 |---|---|
-| Strategy, phases, critical path | [`pythia-simulator/ROADMAP.md`](https://github.com/ram-de/pythia-simulator/blob/main/ROADMAP.md) |
-| Open tickets (this repo + simulator + personas) | [Pythia GitHub Project](https://github.com/users/ram-de/projects/) |
-| Current sprint narrative | [`pythia-simulator/CONTEXT.md`](https://github.com/ram-de/pythia-simulator/blob/main/CONTEXT.md) |
-| Team conventions | [`pythia-simulator/AGENTS.md`](https://github.com/ram-de/pythia-simulator/blob/main/AGENTS.md) |
+| Strategy, phases, critical path | [`sidira-simulator/ROADMAP.md`](https://github.com/ram-de/sidira-simulator/blob/main/ROADMAP.md) |
+| Open tickets (this repo + simulator + personas) | [Sidira GitHub Project](https://github.com/users/ram-de/projects/) |
+| Current sprint narrative | [`sidira-simulator/CONTEXT.md`](https://github.com/ram-de/sidira-simulator/blob/main/CONTEXT.md) |
+| Team conventions | [`sidira-simulator/AGENTS.md`](https://github.com/ram-de/sidira-simulator/blob/main/AGENTS.md) |
 
 ## This repo's current state
 
@@ -18,4 +18,4 @@
 
 The Acme sample is sufficient input for the simulator until a real customer has a product to crawl. Phase 2 unblocks when the first customer signs.
 
-Specs and ticket detail live in the GitHub Project under repo:pythia-crawler.
+Specs and ticket detail live in the GitHub Project under repo:sidira-crawler.
