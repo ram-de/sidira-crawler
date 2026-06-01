@@ -1,6 +1,6 @@
 """Feature Pack schema.
 
-These models are duplicated here until pythia-schemas exists. When that
+These models are duplicated here until sidira-schemas exists. When that
 shared package lands, import from it instead and delete this file.
 """
 

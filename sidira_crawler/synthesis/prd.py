@@ -13,8 +13,8 @@ that reads like a PRD a PM would have written from scratch. Sections:
 
 from __future__ import annotations
 
-from pythia_crawler.llm import LLMClient
-from pythia_crawler.walker import RawWalk
+from sidira_crawler.llm import LLMClient
+from sidira_crawler.walker import RawWalk
 
 _SYSTEM_PROMPT = """You are a product manager reverse-engineering a PRD from
 observed product behavior. You will receive raw observations of a single

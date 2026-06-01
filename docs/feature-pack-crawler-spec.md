@@ -1,6 +1,6 @@
 ---
 type: docs
-domain: pythia
+domain: sidira
 status: draft
 date: 2026-05-20
 ---
@@ -13,7 +13,7 @@ date: 2026-05-20
 
 ## Overview
 
-The Feature Pack Crawler is the third input to the Pythia simulation engine, alongside (1) the **persona pack** and (2) the **PM's hypothesis / proposed feature**. It produces a structured, weekly snapshot of how the customer's product currently works — in the same shape PMs use to describe new features (PRD + Figma) — so the simulation can compare current vs proposed apples-to-apples.
+The Feature Pack Crawler is the third input to the Sidira simulation engine, alongside (1) the **persona pack** and (2) the **PM's hypothesis / proposed feature**. It produces a structured, weekly snapshot of how the customer's product currently works — in the same shape PMs use to describe new features (PRD + Figma) — so the simulation can compare current vs proposed apples-to-apples.
 
 ### Why this exists
 
@@ -132,7 +132,7 @@ Weekly crawl. Customer can trigger ad-hoc re-crawl on demand (e.g., right after 
 
 | Decision | Choice | Reasoning |
 |---|---|---|
-| Where the crawler runs | Pythia's infra | Same pattern as Userlytics / Maze / Mintlify enterprise; avoids 6–12 month per-logo deploy cycle of self-hosted |
+| Where the crawler runs | Sidira's infra | Same pattern as Userlytics / Maze / Mintlify enterprise; avoids 6–12 month per-logo deploy cycle of self-hosted |
 | Crawler engine | Playwright | Cross-browser, headless, good auth + interception primitives |
 | Storage | Object store (per-customer prefix) + git-tagged snapshots | Versioning is free; per-customer isolation is non-negotiable for enterprise |
 | Compute | On-demand container per customer crawl | Bounded ops surface; can be scheduled |
@@ -183,16 +183,16 @@ Screens, transitions, copy, components, states, role-gated content. Always crawl
 
 ---
 
-## How the artifact is consumed by Pythia
+## How the artifact is consumed by Sidira
 
 When a PM submits a hypothesis ("add a reorder button to the homepage for late-night munchers"):
 
-1. Pythia parses the hypothesis → identifies affected capabilities ("Reorder", "Homepage")
+1. Sidira parses the hypothesis → identifies affected capabilities ("Reorder", "Homepage")
 2. Pulls the relevant reverse-PRDs + reverse-Figma-specs from the latest snapshot
 3. Pulls the relevant personas from the customer's persona pack
 4. Splices everything into the persona prompt:
    > *"You are [persona]. Here's what the app looks like today: [reverse-PRD + relevant slice of reverse-Figma]. Here's what they're proposing: [hypothesis + PM-submitted PRD + Figma]. React."*
-5. Persona reacts; Pythia scores → confidence score returned to PM
+5. Persona reacts; Sidira scores → confidence score returned to PM
 
 The snapshot version is recorded on the simulation result. Re-running an old hypothesis re-uses its original snapshot for full reproducibility.
 
@@ -207,7 +207,7 @@ The snapshot version is recorded on the simulation result. Re-running an old hyp
 | Capability = unit of analysis | Maps to how PMs/orgs already think and own features |
 | MVP: customer declares capabilities | Eliminates riskiest component (LLM synthesis quality) |
 | MVP: multi-role per capability | Enterprise apps are role-gated; single-role would mislead |
-| Infrastructure: Pythia's infra + customer sandbox | Avoids 6–12 month per-logo self-hosted deploy cycle |
+| Infrastructure: Sidira's infra + customer sandbox | Avoids 6–12 month per-logo self-hosted deploy cycle |
 | Engine: Playwright | Standard headless crawler with auth/interception |
 | Cadence: weekly + on-demand | Weekly is the value prop; on-demand is the release-day safety net |
 | Snapshot versioning is mandatory | Reproducibility of past simulations + drift detection |
@@ -228,8 +228,8 @@ The snapshot version is recorded on the simulation result. Re-running an old hyp
 
 ## Related
 
-- [[pythia]] — overall project
-- [[pythia-de-spec]] — pretraining corpus spec (sibling, orthogonal layer)
+- [[sidira]] — overall project
+- [[sidira-de-spec]] — pretraining corpus spec (sibling, orthogonal layer)
 - `~/vaults/personal/sessions/persona-classifier/context.md` — persona pack (the other input to simulation)
 - [[augur]] — consumer product (not the target customer for this crawler)
 - [[lumen]] — enterprise product (target customer)
