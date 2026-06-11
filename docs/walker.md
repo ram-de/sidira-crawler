@@ -65,7 +65,7 @@ the signature — content varies per entity, structure does not.
 |---|---|
 | JS-only SPA (empty HTML shell) | Settle = load → network-idle → DOM-stable polling; the rendered app is what gets captured. |
 | Blocking consent overlay | The pre-dismissal state is its own screen; dismissal (affirmative-verb button: accept / agree / allow / got it / ok / continue …) is a recorded one-hop transition to the clean screen. |
-| Login wall with `?next=` | Guard → login is a transition; with credentials, submit → (interstitials) → original target are all recorded hops. Without credentials the login screen is still observed. |
+| Login wall with `?next=` | Guard → login is a transition; with credentials, submit → (interstitials) → original target are all recorded hops. Without credentials the login screen is still observed. Continuation-bearing screens (login walls, chooser interstitials) are *observed* once but *expanded* once per distinct URL, so two guarded targets bouncing to the same login screen with different `?next=` continuations are both round-tripped. |
 | Chooser interstitial | Recognized as its own screen; the walker picks the **first** option deterministically and records the hop. |
 | Lazy-loaded content | Incremental scroll during settle so below-the-fold content is captured. |
 | Bounded infinite feed | Scrolling stops by *structure* (3 consecutive no-growth stalls or stable height), never by the hard cap (30 rounds). If the trailing in-flow element changed since first paint, the exhausted state is recorded as its own screen. |

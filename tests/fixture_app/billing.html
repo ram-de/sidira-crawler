@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful — Billing</title>
+  <script>
+    // Second login wall: bounces to the SAME /login.html screen as the member
+    // kitchen, but with a DIFFERENT ?next= continuation. Pins that the walker
+    // expands continuation-bearing states per query, not once per screen.
+    if (!document.cookie.includes('plateful_auth=1')) {
+      location.replace('/login.html?next=' + encodeURIComponent('/billing.html'));
+    }
+  </script>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <nav>
+    <a class="nav-link" href="/" data-testid="nav-home">Home</a>
+  </nav>
+</header>
+<main>
+  <h1>Billing</h1>
+  <p data-testid="billing-plan">You are on the family table plan, renewing on the
+    first of the month.</p>
+  <p>Receipts land in your inbox the morning after each renewal. Pausing your plan
+    keeps your saved recipes warm for a year.</p>
+</main>
+<script src="/consent.js"></script>
+</body>
+</html>

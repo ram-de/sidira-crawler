@@ -111,6 +111,17 @@ def test_login_roundtrip_with_credentials(full_walk: RawWalk) -> None:
     assert members[0] in reachable, "guard -> login -> ... -> target chain must connect"
 
 
+def test_second_guarded_target_reached(full_walk: RawWalk) -> None:
+    """Two guarded pages bounce to the SAME login screen with DIFFERENT ?next=
+    continuations. Observation dedupe must not eat the second round-trip."""
+    routes = _routes(full_walk)
+    assert "/members.html" in routes, "first guarded target must be reached"
+    assert "/billing.html" in routes, (
+        "second guarded target must be reached too — its login bounce shares the "
+        "login screen but carries a different ?next= continuation"
+    )
+
+
 def test_login_wall_without_credentials(fixture_server, browser) -> None:
     result = walk(fixture_server + "/", "guest", depth=3, browser=browser)
     routes = _routes(result)

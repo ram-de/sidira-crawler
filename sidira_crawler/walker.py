@@ -433,6 +433,22 @@ class _Node:
     depth: int
 
 
+def _expansion_key(state: _PageState) -> str:
+    """Dedupe key for BFS *expansion* (distinct from observation dedupe).
+
+    Ordinary screens are expanded once per ``screen_id``. Continuation-bearing
+    states — login walls and chooser interstitials — are pass-through screens
+    whose onward behavior depends on the query string (e.g. ``?next=/a`` vs
+    ``?next=/b``), so they are expanded once per (screen_id, full URL). The
+    set of full URLs is bounded by the BFS depth and per-screen candidate
+    caps, and enumeration order is deterministic, so this stays bounded and
+    reproducible.
+    """
+    if state.has_password or state.is_chooser:
+        return f"{state.screen_id}\x1f{state.url}"
+    return state.screen_id
+
+
 # --------------------------------------------------------------------------
 # Page helpers
 # --------------------------------------------------------------------------
@@ -727,7 +743,8 @@ def _walk(
     depth: int,
 ) -> RawWalk:
     result = RawWalk(capability_name="", role=role)
-    visited: set[str] = set()
+    visited: set[str] = set()  # observation dedupe: one observation per screen_id
+    expanded: set[str] = set()  # expansion dedupe: see _expansion_key
     transition_keys: set[tuple[str, str, str]] = set()
     queue: deque[_Node] = deque()
 
@@ -737,6 +754,15 @@ def _walk(
         visited.add(state.screen_id)
         result.observations.append(_to_observation(state, role))
         return True
+
+    def maybe_queue(state: _PageState, path: tuple[dict, ...], node_depth: int) -> None:
+        if node_depth >= depth:
+            return
+        key = _expansion_key(state)
+        if key in expanded:
+            return
+        expanded.add(key)
+        queue.append(node_for(state, path, node_depth))
 
     def record_transition(from_id: str, to_id: str, trigger: str) -> None:
         key = (from_id, to_id, trigger)
@@ -761,8 +787,11 @@ def _walk(
         if new_state.screen_id == node.screen_id:
             return
         record_transition(node.screen_id, new_state.screen_id, trigger)
-        if record_screen(new_state) and node.depth + 1 < depth:
-            queue.append(node_for(new_state, node.path + (action,), node.depth + 1))
+        record_screen(new_state)
+        # Queue for expansion even when the screen was already observed: a
+        # continuation-bearing state reached with a new query still owes us
+        # its onward round-trip (see _expansion_key).
+        maybe_queue(new_state, node.path + (action,), node.depth + 1)
 
     def expand(page: Page, node: _Node) -> None:
         state = _capture_state(page)
@@ -838,8 +867,7 @@ def _walk(
         _goto(page, entry_url)
         state = _capture_state(page)
         record_screen(state)
-        if depth > 0:
-            queue.append(node_for(state, (), 0))
+        maybe_queue(state, (), 0)
     finally:
         context.close()
 
