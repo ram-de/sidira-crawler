@@ -114,6 +114,46 @@ _JS_HELPERS = """
   );
 """
 
+# Set an input's value via the PROTOTYPE's native value setter, not
+# `el.value = v`. Frameworks with controlled inputs (React et al.) install an
+# instance-level value tracker; a direct assignment updates the tracker too,
+# so the framework sees "no change" on the input event and never updates its
+# state — the form then submits empty fields. The prototype setter bypasses
+# the instance tracker, so the dispatched input event registers as a real edit.
+_JS_SETVAL = """
+  const __setVal = (el, v) => {
+    el.focus();
+    const desc = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(el).constructor.prototype, 'value');
+    if (desc && desc.set) desc.set.call(el, v); else el.value = v;
+    el.dispatchEvent(new Event('input', {bubbles: true}));
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+  };
+"""
+
+# Deterministic synthetic values for empty text-like inputs, filled before a
+# button-type candidate is clicked so required-field validation cannot
+# silently block exploration (wizard steps, gated submits). Same values every
+# run — determinism is part of the walker contract. Credentialed login walls
+# never reach this path: the login handler takes precedence in `expand`.
+_JS_FILL = """
+  const __fillValue = (inp) => {
+    if (inp.tagName === 'TEXTAREA') return 'walker';
+    const type = (inp.getAttribute('type') || 'text').toLowerCase();
+    const values = {email: 'walker@example.com', password: 'walker-password-1',
+                    text: 'walker', search: 'walker', tel: '5550100', number: '1'};
+    return type in values ? values[type] : null;
+  };
+  const __fillEmpty = (scope) => {
+    for (const inp of scope.querySelectorAll('input, textarea')) {
+      if (!__vis(inp) || __live(inp)) continue;
+      if (inp.disabled || inp.readOnly || inp.value) continue;
+      const v = __fillValue(inp);
+      if (v !== null) __setVal(inp, v);
+    }
+  };
+"""
+
 _JS_CAPTURE = (
     "() => {"
     + _JS_HELPERS
@@ -276,7 +316,7 @@ _JS_ENUM = """
                   testid: el.getAttribute('data-testid') || ''});
       els.push(el);
     }
-    return {cands: cands, els: els};
+    return {cands: cands, els: els, root: root};
   };
 """
 
@@ -288,10 +328,18 @@ _JS_CLICK = (
     "(args) => {"
     + _JS_HELPERS
     + _JS_ENUM
+    + _JS_SETVAL
+    + _JS_FILL
     + """
   const got = __collect(args[1]);
   const el = got.els[args[0]];
   if (!el) return false;
+  // Button-type candidates first fill every empty text-like input in scope
+  // (the button's enclosing form when one exists, else the enumeration root)
+  // so required-field validation cannot silently swallow the click.
+  if (el.tagName !== 'A') {
+    __fillEmpty(el.form || el.closest('form') || got.root);
+  }
   el.click();
   return true;
 }"""
@@ -301,6 +349,7 @@ _JS_CLICK = (
 _JS_LOGIN = (
     "(args) => {"
     + _JS_HELPERS
+    + _JS_SETVAL
     + """
   const username = args[0], password = args[1];
   const pw = Array.from(document.querySelectorAll('input[type="password"]')).find(__vis);
@@ -309,22 +358,8 @@ _JS_LOGIN = (
   const userSel = 'input[type="email"], input[autocomplete="username"], ' +
                   'input[type="text"], input:not([type])';
   const uf = Array.from(scope.querySelectorAll(userSel)).find((el) => __vis(el) && el !== pw);
-  // Set via the PROTOTYPE's native value setter, not `el.value = v`. Frameworks
-  // with controlled inputs (React et al.) install an instance-level value
-  // tracker; a direct assignment updates the tracker too, so the framework
-  // sees "no change" on the input event and never updates its state — the
-  // form then submits empty fields. The prototype setter bypasses the
-  // instance tracker, so the dispatched input event registers as a real edit.
-  const setVal = (el, v) => {
-    el.focus();
-    const desc = Object.getOwnPropertyDescriptor(
-      Object.getPrototypeOf(el).constructor.prototype, 'value');
-    if (desc && desc.set) desc.set.call(el, v); else el.value = v;
-    el.dispatchEvent(new Event('input', {bubbles: true}));
-    el.dispatchEvent(new Event('change', {bubbles: true}));
-  };
-  if (uf) setVal(uf, username);
-  setVal(pw, password);
+  if (uf) __setVal(uf, username);
+  __setVal(pw, password);
   let btn = null;
   for (const b of scope.querySelectorAll('button[type="submit"], input[type="submit"], button')) {
     if (!__vis(b)) continue;

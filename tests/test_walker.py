@@ -173,6 +173,25 @@ def test_wizard_steps_on_same_route_are_distinct_screens(full_walk: RawWalk) -> 
     assert hops, "the step-1 -> step-2 transition must be recorded as one hop"
 
 
+def test_required_inputs_filled_before_submit(full_walk: RawWalk) -> None:
+    """Wizard step 1 REJECTS empty submits (required dish text + email). The
+    walker must deterministically fill empty text-like inputs before clicking
+    button candidates, or advancement is silently blocked and step 2 is
+    unreachable for the whole walk."""
+    screens = _screens(full_walk)
+    step2 = [s for s, o in screens.items() if "wizard-servings" in o.data_testids]
+    assert step2, (
+        "step 2 is gated behind required step-1 inputs — the walker must fill "
+        "them before clicking Next"
+    )
+    hops = [
+        t
+        for t in full_walk.transitions
+        if t.to_screen_id in step2 and t.trigger == "click button 'Next'"
+    ]
+    assert hops, "advancing the gated wizard must be recorded as the Next click"
+
+
 # ---------------------------------------------------------------------------
 # Modal with URL
 # ---------------------------------------------------------------------------

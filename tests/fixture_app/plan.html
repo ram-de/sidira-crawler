@@ -16,7 +16,9 @@
   <!-- Two-step wizard on ONE url. Step 2 swaps the fields in place via JS
        without changing route, dialog, overlay, or any other flag — only the
        page STRUCTURE (testids, form-control types) changes. Pins that the
-       walker treats same-route structural states as distinct screens. -->
+       walker treats same-route structural states as distinct screens.
+       Step 1 REJECTS empty submits (required dish + email): the walker must
+       fill text-like inputs before clicking Next or step 2 is unreachable. -->
   <form id="wizard">
     <div id="wizard-step"></div>
   </form>
@@ -39,10 +41,25 @@
   function renderStep1() {
     step.innerHTML =
       '<label>What are you cooking first? ' +
-      '<input type="text" name="dish" data-testid="wizard-dish"></label> ' +
+      '<input type="text" name="dish" data-testid="wizard-dish" required></label> ' +
+      '<label>Email for the shopping list ' +
+      '<input type="email" name="email" data-testid="wizard-email" required></label> ' +
       '<button type="button" data-testid="wizard-next">Next</button>';
     step.querySelector('[data-testid="wizard-next"]')
-      .addEventListener('click', renderStep2);
+      .addEventListener('click', function () {
+        var dish = step.querySelector('[data-testid="wizard-dish"]');
+        var email = step.querySelector('[data-testid="wizard-email"]');
+        if (!dish.value || email.value.indexOf('@') === -1) {
+          if (!step.querySelector('.wizard-error')) {
+            var err = document.createElement('p');
+            err.className = 'wizard-error';
+            err.textContent = 'Both fields are needed before we can plan.';
+            step.appendChild(err);
+          }
+          return;
+        }
+        renderStep2();
+      });
   }
   renderStep1();
 })();
