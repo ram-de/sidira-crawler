@@ -290,9 +290,17 @@ _JS_LOGIN = (
   const userSel = 'input[type="email"], input[autocomplete="username"], ' +
                   'input[type="text"], input:not([type])';
   const uf = Array.from(scope.querySelectorAll(userSel)).find((el) => __vis(el) && el !== pw);
+  // Set via the PROTOTYPE's native value setter, not `el.value = v`. Frameworks
+  // with controlled inputs (React et al.) install an instance-level value
+  // tracker; a direct assignment updates the tracker too, so the framework
+  // sees "no change" on the input event and never updates its state — the
+  // form then submits empty fields. The prototype setter bypasses the
+  // instance tracker, so the dispatched input event registers as a real edit.
   const setVal = (el, v) => {
     el.focus();
-    el.value = v;
+    const desc = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(el).constructor.prototype, 'value');
+    if (desc && desc.set) desc.set.call(el, v); else el.value = v;
     el.dispatchEvent(new Event('input', {bubbles: true}));
     el.dispatchEvent(new Event('change', {bubbles: true}));
   };
