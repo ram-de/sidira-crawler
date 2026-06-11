@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful — Pantry sync</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <nav>
+    <a class="nav-link" href="/" data-testid="nav-home">Home</a>
+  </nav>
+</header>
+<main>
+  <h1>Pantry sync</h1>
+  <p>Sync your pantry inventory with the shared community shelf. The sync runs
+     against a slow backend call, so the result appears well after the click.</p>
+  <!-- Hostile trait: deferred async click effect. The button's handler awaits
+       a SLOW fetch before mutating the DOM. A settle that ignores in-flight
+       requests returns first, the click looks like a no-op, and the deferred
+       effect either goes unrecorded or — worse — gets blamed on whatever the
+       walker clicks NEXT. The walker must wait for network quiescence. -->
+  <button class="sync-btn" data-testid="sync-start">Sync pantry</button>
+  <div id="sync-result"></div>
+</main>
+<script src="/consent.js"></script>
+<script>
+(function () {
+  document.querySelector('[data-testid="sync-start"]').addEventListener('click', function () {
+    fetch('/slow').then(function () {
+      var result = document.getElementById('sync-result');
+      if (result.firstChild) return;
+      var p = document.createElement('p');
+      p.setAttribute('data-testid', 'sync-done');
+      p.textContent = 'Pantry synced with the community shelf.';
+      result.appendChild(p);
+    });
+  });
+})();
+</script>
+</body>
+</html>
