@@ -57,19 +57,32 @@ jobs:
           path: raw.jsonl
           if-no-files-found: warn
 
-      # R2 upload is optional: it runs only when the R2 secrets are configured
-      # on the repo. Secrets cannot be referenced in `if:` directly, so the
-      # guard goes through an env var.
+      # R2 upload is optional: it runs only when ALL FOUR R2 secrets are
+      # configured on the repo — a partial configuration (e.g. only R2_BUCKET)
+      # would otherwise let the upload step run and fail the job. Secrets
+      # cannot be referenced in `if:` directly, so the guard goes through an
+      # env var. Only the NAMES of missing secrets are printed, never values.
       - name: Check R2 secrets
         if: always()
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
-          if [ -n "$R2_BUCKET" ]; then
+          missing=()
+          for name in R2_BUCKET R2_ENDPOINT_URL R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -eq 0 ]; then
             echo "have_r2=true" >> "$GITHUB_ENV"
           else
             echo "have_r2=false" >> "$GITHUB_ENV"
-            echo "::notice title=R2 upload skipped::R2 secrets are not configured on this repo — raw.jsonl was NOT uploaded to R2 (the artifact above still has it). Configure R2_BUCKET, R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY to enable."
+            if [ "${#missing[@]}" -eq 4 ]; then
+              echo "::notice title=R2 upload skipped::R2 secrets are not configured on this repo — raw.jsonl was NOT uploaded to R2 (the artifact above still has it). Configure R2_BUCKET, R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY to enable."
+            else
+              echo "::warning title=R2 upload skipped::R2 configuration is INCOMPLETE — missing: ${missing[*]} — raw.jsonl was NOT uploaded to R2 (the artifact above still has it). Configure all four of R2_BUCKET, R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY to enable."
+            fi
           fi
 
       - name: Upload raw.jsonl to R2
