@@ -29,12 +29,27 @@ Modes
 Entry paths
 -----------
 Each role may declare several ``entry_paths`` in the judge config; every entry
-path gets its own walk on a freshly booted sandbox (and a fresh browser). For
-judging, a role's walks are MERGED for screen coverage (union of observations
-by screen_id), but transition matchers are evaluated against each individual
-walk — never against the merged graph, because stitching edges from different
-walks would fabricate paths no single walk took (login-roundtrip's downstream
-reachability must hold within one walk's transition graph).
+path gets its own walk on a freshly booted sandbox (and a fresh browser). An
+entry may be a plain path string (walked at the config-wide default depth) or
+``{"path": "/...", "depth": N}`` — secondary entries exist to reach specific
+deep states, not to re-explore everything, so they can carry a smaller depth
+budget than the primary walk. For judging, a role's walks are MERGED for
+screen coverage (union of observations by screen_id), but transition matchers
+are evaluated against each individual walk — never against the merged graph,
+because stitching edges from different walks would fabricate paths no single
+walk took (login-roundtrip's downstream reachability must hold within one
+walk's transition graph).
+
+Parallelism
+-----------
+``--jobs N`` runs up to N walks at once (default 1 = sequential). Every walk
+already boots its own sandbox and its own browser, so walks are independent;
+the walker drives *sync* Playwright, which must not be shared across threads,
+so parallelism is PROCESS-level (a spawn-based worker pool). Ports are
+preassigned per walk (bound simultaneously, so they are distinct) before any
+worker starts, results are collected and re-ordered into fixed plan order
+before raw.jsonl is written, and a crashed walk fails the gate with its error
+visible — the judged result is identical to a sequential run.
 
 Gates (any failure exits nonzero): a role below its coverage threshold, a
 missing mustDiscover entry, a determinism mismatch (two identical walks of the
@@ -253,21 +268,51 @@ def validate_config(manifest: dict, config: dict) -> None:
         paths = spec.get("entry_paths")
         if paths is None:
             continue
-        if (
-            not isinstance(paths, list)
-            or not paths
-            or not all(isinstance(p, str) and p.startswith("/") for p in paths)
-        ):
+        if not isinstance(paths, list) or not paths or not all(map(_entry_ok, paths)):
             raise SystemExit(
-                f"role {role!r}: entry_paths must be a non-empty list of '/'-prefixed paths"
+                f"role {role!r}: entry_paths entries must be '/'-prefixed path strings "
+                "or {'path': '/...', 'depth': N >= 1} objects (non-empty list)"
             )
 
 
-def role_entry_paths(config: dict, role: str) -> list[str]:
-    """Entry paths for one role's walks; one fresh-sandbox walk per path.
+def _entry_ok(item) -> bool:
+    """One entry_paths element: a '/'-prefixed string, or a dict with a
+    '/'-prefixed ``path`` and an optional positive-int ``depth``."""
+    if isinstance(item, str):
+        return item.startswith("/")
+    if isinstance(item, dict):
+        path = item.get("path")
+        depth = item.get("depth", 1)
+        return (
+            isinstance(path, str)
+            and path.startswith("/")
+            and isinstance(depth, int)
+            and not isinstance(depth, bool)
+            and depth >= 1
+        )
+    return False
+
+
+def role_entry_specs(config: dict, role: str) -> list[tuple[str, int]]:
+    """(entry path, walk depth) pairs for one role's walks; one fresh-sandbox
+    walk per pair. Plain string entries use the config-wide default depth;
+    ``{"path": ..., "depth": N}`` entries override depth for that walk alone.
     Defaults to the config-wide ``entry_path`` (itself defaulting to "/")."""
-    paths = config["roles"][role].get("entry_paths")
-    return list(paths) if paths else [config.get("entry_path", "/")]
+    default_depth = config.get("depth", 6)
+    items = config["roles"][role].get("entry_paths")
+    if not items:
+        return [(config.get("entry_path", "/"), default_depth)]
+    return [
+        (item, default_depth)
+        if isinstance(item, str)
+        else (item["path"], item.get("depth", default_depth))
+        for item in items
+    ]
+
+
+def role_entry_paths(config: dict, role: str) -> list[str]:
+    """Entry paths for one role's walks (depths dropped)."""
+    return [path for path, _ in role_entry_specs(config, role)]
 
 
 def merge_walks(walks: dict[str, dict]) -> dict:
@@ -427,7 +472,11 @@ def judge(
     }
 
 
-def render_report(verdict: dict, timings: dict[str, float] | None = None) -> str:
+def render_report(
+    verdict: dict,
+    timings: dict[str, float] | None = None,
+    elapsed: float | None = None,
+) -> str:
     """Human-readable coverage report for stdout."""
     lines: list[str] = []
     out = lines.append
@@ -478,7 +527,9 @@ def render_report(verdict: dict, timings: dict[str, float] | None = None) -> str
         out("=== wall-clock ===")
         for label, seconds in timings.items():
             out(f"  {label}: {seconds:.1f}s")
-        out(f"  total: {sum(timings.values()):.1f}s")
+        out(f"  total walk time: {sum(timings.values()):.1f}s")
+        if elapsed is not None:
+            out(f"  elapsed (wall-clock): {elapsed:.1f}s")
     out("")
     out(f"ACCEPTANCE: {'PASS' if verdict['passed'] else 'FAIL'}")
     return "\n".join(lines)
@@ -493,6 +544,23 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _preassign_ports(count: int) -> list[int]:
+    """Reserve ``count`` distinct free ports up front — all sockets are held
+    open simultaneously, so the kernel cannot hand the same port out twice.
+    Parallel walks each get their own preassigned port, which removes the
+    pick-then-bind race two concurrent workers would otherwise have."""
+    socks: list[socket.socket] = []
+    try:
+        for _ in range(count):
+            sock = socket.socket()
+            sock.bind(("127.0.0.1", 0))
+            socks.append(sock)
+        return [sock.getsockname()[1] for sock in socks]
+    finally:
+        for sock in socks:
+            sock.close()
 
 
 def _wait_healthz(base_url: str, timeout: float = 90.0) -> None:
@@ -516,8 +584,8 @@ class ImageSandbox:
         self.container_port = container_port
         self._name: str | None = None
 
-    def boot(self, label: str) -> str:
-        port = _free_port()
+    def boot(self, label: str, port: int | None = None) -> str:
+        port = port if port is not None else _free_port()
         # Walk labels carry "@" and "/" (role@entry_path) — not valid in
         # docker container names.
         safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", label).strip("-") or "walk"
@@ -567,8 +635,8 @@ class ServerCmdSandbox:
         self.server_cmd = server_cmd
         self._proc: subprocess.Popen | None = None
 
-    def boot(self, label: str) -> str:
-        port = _free_port()
+    def boot(self, label: str, port: int | None = None) -> str:
+        port = port if port is not None else _free_port()
         env = dict(os.environ, PORT=str(port))
         self._proc = subprocess.Popen(
             self.server_cmd.replace("{port}", str(port)),
@@ -602,13 +670,16 @@ class ServerCmdSandbox:
         self._proc = None
 
 
-def run_walk(sandbox, label: str, role: str, creds: dict, entry_path: str, depth: int) -> dict:
+def run_walk(
+    sandbox, label: str, role: str, creds: dict, entry_path: str, depth: int,
+    port: int | None = None,
+) -> dict:
     """Boot a fresh sandbox, run one walk with a fresh browser, tear down."""
     from dataclasses import asdict
 
     from sidira_crawler.walker import walk
 
-    base_url = sandbox.boot(label)
+    base_url = sandbox.boot(label, port=port)
     try:
         raw = walk(
             base_url.rstrip("/") + entry_path,
@@ -620,6 +691,112 @@ def run_walk(sandbox, label: str, role: str, creds: dict, entry_path: str, depth
         return asdict(raw)
     finally:
         sandbox.stop()
+
+
+def execute_walk_task(task: dict) -> dict:
+    """Run one planned walk. Never raises: a crash comes back as the
+    ``error`` field so the parent fails the gate with the error visible even
+    when the walk ran in a worker process. Top-level (picklable) on purpose —
+    with ``--jobs N`` this is the function the spawn-based pool executes."""
+    started = time.monotonic()
+    try:
+        sandbox = (
+            ImageSandbox(task["image"]) if task["image"] else ServerCmdSandbox(task["server_cmd"])
+        )
+        walk = run_walk(
+            sandbox, task["label"], task["role"], task["creds"],
+            task["entry_path"], task["depth"], port=task["port"],
+        )
+        return {"label": task["label"], "walk": walk, "error": None,
+                "seconds": time.monotonic() - started}
+    except Exception as exc:
+        return {"label": task["label"], "walk": None,
+                "error": f"{type(exc).__name__}: {exc}",
+                "seconds": time.monotonic() - started}
+
+
+def _report_progress(result: dict) -> None:
+    if result["error"] is not None:
+        print(
+            f"[sandbox-acceptance] walk {result['label']} CRASHED: {result['error']}",
+            file=sys.stderr,
+        )
+    else:
+        walk = result["walk"]
+        print(
+            f"[sandbox-acceptance] walk {result['label']}: "
+            f"{len(walk['observations'])} screens, "
+            f"{len(walk['transitions'])} transitions in {result['seconds']:.1f}s",
+            file=sys.stderr,
+        )
+
+
+def order_results(tasks: list[dict], by_label: dict[str, dict]) -> list[dict]:
+    """Re-order completed walk results into fixed plan order. raw.jsonl line
+    order (and everything downstream) must not depend on which parallel walk
+    finished first."""
+    return [by_label[task["label"]] for task in tasks]
+
+
+def run_plan(tasks: list[dict], jobs: int) -> list[dict]:
+    """Execute every planned walk; return results in PLAN order regardless of
+    completion order. ``jobs=1`` runs inline (sequential, no workers); with
+    ``jobs>1`` each walk runs in its own spawn-based worker process — the
+    walker drives sync Playwright, which must never be shared across threads,
+    so parallelism is process-level and every walk keeps its own sandbox,
+    browser, and preassigned port."""
+    if jobs == 1:
+        results = []
+        for task in tasks:
+            result = execute_walk_task(task)
+            _report_progress(result)
+            results.append(result)
+        return results
+
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    by_label: dict[str, dict] = {}
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=jobs, mp_context=context) as pool:
+        futures = {pool.submit(execute_walk_task, task): task["label"] for task in tasks}
+        for future in as_completed(futures):
+            label = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:  # worker process died (signal, OOM, …)
+                result = {"label": label, "walk": None,
+                          "error": f"{type(exc).__name__}: {exc}", "seconds": 0.0}
+            by_label[result["label"]] = result
+            _report_progress(result)
+    return order_results(tasks, by_label)
+
+
+def assemble_results(
+    tasks: list[dict], results: list[dict], determinism_label: str
+) -> tuple[dict[str, dict[str, dict]], dict | None, dict[str, str], dict[str, float], list]:
+    """Fold per-walk results (already in plan order) into the judge's inputs:
+    (walks by role by entry path, determinism re-walk, crashes, timings,
+    labelled walks for raw.jsonl). Pure — hermetic tests exercise ordering
+    and crash propagation without booting anything."""
+    walks: dict[str, dict[str, dict]] = {}
+    rewalk: dict | None = None
+    crashes: dict[str, str] = {}
+    timings: dict[str, float] = {}
+    labelled: list[tuple[str, str, str, dict]] = []
+    for task, result in zip(tasks, results):
+        label = task["label"]
+        timings[label] = result["seconds"]
+        if result["error"] is not None:
+            crashes[label] = result["error"]
+            continue
+        walk = result["walk"]
+        labelled.append((label, task["role"], task["entry_path"], walk))
+        if label == determinism_label:
+            rewalk = walk
+        else:
+            walks.setdefault(task["role"], {})[task["entry_path"]] = walk
+    return walks, rewalk, crashes, timings, labelled
 
 
 def write_raw_jsonl(
@@ -668,11 +845,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--run-date", required=True, help="Run date (e.g. 2026-06-11).")
     parser.add_argument("--out", default="raw.jsonl", help="raw.jsonl output path.")
-    parser.add_argument("--depth", type=int, default=None, help="Override walk depth.")
+    parser.add_argument(
+        "--depth", type=int, default=None,
+        help="Override walk depth for EVERY walk (including per-entry overrides).",
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=1,
+        help="Run up to N walks in parallel, each in its own worker process "
+        "with its own sandbox and browser. Default 1 = sequential.",
+    )
     args = parser.parse_args(argv)
+    if args.jobs < 1:
+        parser.error("--jobs must be >= 1")
 
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
-    depth = args.depth if args.depth is not None else config.get("depth", 6)
+    default_depth = args.depth if args.depth is not None else config.get("depth", 6)
     det_role = config.get("determinism_role", "member")
 
     if args.server_cmd and not args.manifest:
@@ -701,43 +888,38 @@ def main(argv: list[str] | None = None) -> int:
     from sidira_crawler import __version__ as walker_version
 
     # Plan: one walk per (role, entry path), plus a second determinism walk of
-    # the determinism role's primary entry path. Fresh sandbox and fresh
-    # browser per walk.
-    det_path = role_entry_paths(config, det_role)[0]
-    plan: list[tuple[str, str, str]] = []
+    # the determinism role's primary entry path. Fresh sandbox, fresh browser,
+    # and a preassigned (distinct) port per walk. The plan order is fixed;
+    # parallel completion order never leaks into the output.
+    det_path, det_depth = role_entry_specs(config, det_role)[0]
+    plan: list[tuple[str, str, str, int]] = []
     for role in config["roles"]:
-        for path in role_entry_paths(config, role):
-            plan.append((f"{role}@{path}", role, path))
+        for path, entry_depth in role_entry_specs(config, role):
+            plan.append((f"{role}@{path}", role, path, entry_depth))
     determinism_label = f"{det_role}-determinism@{det_path}"
-    plan.append((determinism_label, det_role, det_path))
+    plan.append((determinism_label, det_role, det_path, det_depth))
 
-    walks: dict[str, dict[str, dict]] = {}
-    rewalk: dict | None = None
-    crashes: dict[str, str] = {}
-    timings: dict[str, float] = {}
-    labelled: list[tuple[str, str, str, dict]] = []
+    ports = _preassign_ports(len(plan))
+    tasks = [
+        {
+            "label": label,
+            "role": role,
+            "entry_path": path,
+            "depth": args.depth if args.depth is not None else entry_depth,
+            "port": port,
+            "creds": config["roles"][role],
+            "image": args.image or None,
+            "server_cmd": args.server_cmd or None,
+        }
+        for (label, role, path, entry_depth), port in zip(plan, ports)
+    ]
 
-    for label, role, path in plan:
-        creds = config["roles"][role]
-        started = time.monotonic()
-        try:
-            walk = run_walk(make_sandbox(), label, role, creds, path, depth)
-        except Exception as exc:  # crash gate: report, keep judging the rest
-            crashes[label] = f"{type(exc).__name__}: {exc}"
-            timings[label] = time.monotonic() - started
-            print(f"[sandbox-acceptance] walk {label} CRASHED: {crashes[label]}", file=sys.stderr)
-            continue
-        timings[label] = time.monotonic() - started
-        labelled.append((label, role, path, walk))
-        if label == determinism_label:
-            rewalk = walk
-        else:
-            walks.setdefault(role, {})[path] = walk
-        print(
-            f"[sandbox-acceptance] walk {label}: {len(walk['observations'])} screens, "
-            f"{len(walk['transitions'])} transitions in {timings[label]:.1f}s",
-            file=sys.stderr,
-        )
+    run_started = time.monotonic()
+    results = run_plan(tasks, args.jobs)
+    elapsed = time.monotonic() - run_started
+    walks, rewalk, crashes, timings, labelled = assemble_results(
+        tasks, results, determinism_label
+    )
 
     meta = {
         "schema": 2,
@@ -745,7 +927,9 @@ def main(argv: list[str] | None = None) -> int:
         "server_cmd": args.server_cmd or None,
         "run_date": args.run_date,
         "walker_version": walker_version,
-        "depth": depth,
+        "depth": default_depth,
+        "walk_depths": {task["label"]: task["depth"] for task in tasks},
+        "jobs": args.jobs,
         "judge_config": str(args.config),
         "roles": list(config["roles"]),
         "entry_paths": {role: role_entry_paths(config, role) for role in config["roles"]},
@@ -755,7 +939,7 @@ def main(argv: list[str] | None = None) -> int:
     write_raw_jsonl(Path(args.out), meta, labelled)
 
     verdict = judge(manifest, config, walks, rewalk, crashes)
-    print(render_report(verdict, timings))
+    print(render_report(verdict, timings, elapsed))
     return 0 if verdict["passed"] else 1
 
 

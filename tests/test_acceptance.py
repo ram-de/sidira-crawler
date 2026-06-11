@@ -395,6 +395,27 @@ def test_role_entry_paths_defaults_and_explicit():
     assert sa.role_entry_paths({"roles": {"guest": {}}}, "guest") == ["/"]
 
 
+def test_role_entry_specs_plain_strings_use_default_depth():
+    config = {"depth": 6, "roles": {"member": {"entry_paths": ["/", "/a"]}}}
+    assert sa.role_entry_specs(config, "member") == [("/", 6), ("/a", 6)]
+    # Config-wide depth defaults to 6 when absent.
+    assert sa.role_entry_specs({"roles": {"member": {"entry_paths": ["/"]}}}, "member") == [("/", 6)]
+
+
+def test_role_entry_specs_dict_entries_override_depth_per_walk():
+    config = {"depth": 6, "roles": {"member": {"entry_paths": [
+        "/", {"path": "/account/plan", "depth": 5}, {"path": "/x"}]}}}
+    assert sa.role_entry_specs(config, "member") == [
+        ("/", 6), ("/account/plan", 5), ("/x", 6)]
+    # role_entry_paths drops the depths but keeps order.
+    assert sa.role_entry_paths(config, "member") == ["/", "/account/plan", "/x"]
+
+
+def test_role_entry_specs_default_entry_path_uses_default_depth():
+    config = {"entry_path": "/start", "depth": 4, "roles": {"guest": {}}}
+    assert sa.role_entry_specs(config, "guest") == [("/start", 4)]
+
+
 def test_merge_walks_unions_observations_and_transitions():
     first = walk([obs("/a::s1"), obs("/b::s2")], [tr("/a::s1", "/b::s2", "click link 'b'")])
     second = walk([obs("/a::s1"), obs("/c::s3")], [tr("/a::s1", "/b::s2", "click link 'b'"),
@@ -540,6 +561,112 @@ def test_validate_config_rejects_malformed_entry_paths():
             sa.validate_config(MANIFEST, broken)
 
 
+def test_validate_config_accepts_depth_override_entries():
+    config = {**CONFIG, "roles": {**CONFIG["roles"],
+                                  "member": {**CONFIG["roles"]["member"],
+                                             "entry_paths": [
+                                                 "/", {"path": "/a", "depth": 5},
+                                                 {"path": "/b"}]}}}
+    sa.validate_config(MANIFEST, config)  # must not raise
+
+
+def test_validate_config_rejects_malformed_depth_override_entries():
+    for bad_entry in (
+        {"path": "relative", "depth": 5},   # path must be '/'-prefixed
+        {"depth": 5},                       # path missing
+        {"path": "/a", "depth": 0},         # depth must be >= 1
+        {"path": "/a", "depth": -3},
+        {"path": "/a", "depth": "deep"},    # depth must be an int
+        {"path": "/a", "depth": True},      # bools are not depths
+        {"path": 1, "depth": 5},
+    ):
+        broken = {**CONFIG, "roles": {**CONFIG["roles"],
+                                      "member": {**CONFIG["roles"]["member"],
+                                                 "entry_paths": ["/", bad_entry]}}}
+        with pytest.raises(SystemExit):
+            sa.validate_config(MANIFEST, broken)
+
+
+# --------------------------------------------------------------------------
+# Parallel-walk plumbing: plan-order output and crash propagation
+# --------------------------------------------------------------------------
+
+
+def _task(label, role="member", entry_path="/", depth=6):
+    return {"label": label, "role": role, "entry_path": entry_path, "depth": depth,
+            "port": 0, "creds": {}, "image": None, "server_cmd": None}
+
+
+def _result(label, walk_dict=None, error=None, seconds=1.0):
+    return {"label": label, "walk": walk_dict, "error": error, "seconds": seconds}
+
+
+def test_order_results_restores_plan_order_regardless_of_completion_order():
+    tasks = [_task("a@/"), _task("b@/"), _task("c@/")]
+    # Completion order c, a, b — the output must follow the plan: a, b, c.
+    by_label = {}
+    for label in ("c@/", "a@/", "b@/"):
+        by_label[label] = _result(label)
+    assert [r["label"] for r in sa.order_results(tasks, by_label)] == ["a@/", "b@/", "c@/"]
+
+
+def test_assemble_results_groups_walks_and_keeps_plan_order():
+    tasks = [
+        _task("member@/", "member", "/"),
+        _task("member@/a", "member", "/a"),
+        _task("member-determinism@/", "member", "/"),
+    ]
+    w1, w2, w3 = walk([obs("/a::s1")]), walk([obs("/b::s2")]), walk([obs("/a::s1")])
+    results = [_result(t["label"], w) for t, w in zip(tasks, (w1, w2, w3))]
+    walks, rewalk, crashes, timings, labelled = sa.assemble_results(
+        tasks, results, "member-determinism@/"
+    )
+    assert walks == {"member": {"/": w1, "/a": w2}}
+    assert rewalk is w3  # the determinism re-walk is kept out of the role walks
+    assert crashes == {}
+    assert list(timings) == ["member@/", "member@/a", "member-determinism@/"]
+    assert [(label, role, path) for label, role, path, _ in labelled] == [
+        ("member@/", "member", "/"),
+        ("member@/a", "member", "/a"),
+        ("member-determinism@/", "member", "/"),
+    ]
+
+
+def test_assemble_results_crash_is_visible_and_fails_judgement():
+    tasks = [_task("member@/", "member", "/"), _task("guest@/", "guest", "/")]
+    results = [
+        _result("member@/", _full_member_walk()),
+        _result("guest@/", None, error="RuntimeError: sandbox never came up"),
+    ]
+    walks, rewalk, crashes, timings, labelled = sa.assemble_results(tasks, results, "x")
+    assert crashes == {"guest@/": "RuntimeError: sandbox never came up"}
+    assert "guest" not in walks  # crashed walk contributes no observations
+    assert len(labelled) == 1
+    verdict = sa.judge(MANIFEST, CONFIG, walks, walks["member"]["/"], crashes)
+    assert verdict["passed"] is False  # crash gate
+    assert "guest@/" in verdict["crashes"]
+
+
+def test_execute_walk_task_reports_crash_instead_of_raising():
+    # A task whose sandbox command can never become healthy must come back as
+    # an error result, not an exception (the parent runs this in a pool).
+    task = _task("guest@/")
+    task["server_cmd"] = "false"  # exits immediately; /healthz never answers
+    import unittest.mock
+
+    with unittest.mock.patch.object(sa, "_wait_healthz",
+                                    side_effect=RuntimeError("not healthy")):
+        result = sa.execute_walk_task(task)
+    assert result["label"] == "guest@/"
+    assert result["walk"] is None
+    assert "not healthy" in result["error"]
+
+
+def test_preassign_ports_are_distinct():
+    ports = sa._preassign_ports(8)
+    assert len(set(ports)) == 8
+
+
 # --------------------------------------------------------------------------
 # The shipped judge config stays in lockstep with the shipped manifest schema
 # --------------------------------------------------------------------------
@@ -559,3 +686,16 @@ def test_shipped_config_parses_and_has_known_matcher_kinds():
         assert matcher.get("kind", "observation") == "observation"
     for matcher in config["transition_matchers"].values():
         assert matcher["kind"] in {"transition", "login-roundtrip", "scroll-growth"}
+
+
+def test_shipped_config_entry_depths():
+    import json
+
+    config_path = Path(__file__).resolve().parent.parent / "acceptance" / "streamly-sandbox.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    # Primary walks keep the default depth 6; secondary entries carry the
+    # verified trims (login wall is hop 0 of /my-list; plan page hop 2 and
+    # upgrade-confirm hop 3 of /account/plan).
+    assert sa.role_entry_specs(config, "guest") == [("/", 6), ("/my-list", 2)]
+    assert sa.role_entry_specs(config, "member") == [("/", 6), ("/account/plan", 5)]
+    assert sa.role_entry_specs(config, "premium") == [("/", 6), ("/account/plan", 5)]

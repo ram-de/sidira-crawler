@@ -13,7 +13,14 @@
     "are merged (screen-id union) for screen coverage, while transition matchers",
     "must hold within a single walk. /my-list (guest) exercises the guarded-URL",
     "login wall + next= round-trip; /account/plan (member, premium) puts the",
-    "plan/upgrade/downloads screens within depth reach of the post-login walk."
+    "plan/upgrade/downloads screens within depth reach of the post-login walk.",
+    "Secondary entries carry per-walk depth overrides — they exist to reach",
+    "specific deep states, not to re-explore everything. Hop arithmetic verified",
+    "against real walk graphs: guest /my-list lands ON the login wall (hop 0),",
+    "so depth 2 keeps one hop of context; member/premium /account/plan reach the",
+    "plan page at hop 2 (login submit 1, profile select 2 via forwarded next=)",
+    "and the upgrade-confirm stage at hop 3, so depth 5 keeps headroom for the",
+    "confirm->done hop while skipping the redundant deep re-crawl of /browse."
   ],
   "depth": 6,
   "determinism_role": "member",
@@ -22,19 +29,19 @@
       "username": null,
       "password": null,
       "threshold": 0.8,
-      "entry_paths": ["/", "/my-list"]
+      "entry_paths": ["/", {"path": "/my-list", "depth": 2}]
     },
     "member": {
       "username": "member@streamly.test",
       "password": "watchmore",
       "threshold": 0.8,
-      "entry_paths": ["/", "/account/plan"]
+      "entry_paths": ["/", {"path": "/account/plan", "depth": 5}]
     },
     "premium": {
       "username": "premium@streamly.test",
       "password": "watchmore4k",
       "threshold": 0.8,
-      "entry_paths": ["/", "/account/plan"]
+      "entry_paths": ["/", {"path": "/account/plan", "depth": 5}]
     }
   },
   "screen_matchers": {

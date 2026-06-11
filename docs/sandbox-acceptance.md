@@ -34,14 +34,21 @@ sees. Moving any judge knowledge into the engine would invalidate the result.
 
 ## What a run does
 
-Per run (depth 6, fresh sandbox **and** fresh browser per walk):
+Per run (fresh sandbox **and** fresh browser per walk):
 
 1. Walk each role from each of its configured `entry_paths` — one walk per
    `(role, entry path)` pair (currently guest: `/`, `/my-list`; member and
    premium: `/`, `/account/plan` — 6 walks). A secondary entry path puts
    deep guarded surfaces (the login wall behind `/my-list`, the plan/upgrade
    screens behind `/account/plan`) within the walker's depth budget without
-   raising the budget for everything else.
+   raising the budget for everything else. An entry is either a plain path
+   string (walked at the config-wide default depth, currently 6) or
+   `{"path": "/...", "depth": N}` with a per-walk depth override — secondary
+   entries exist to reach specific deep states, not to re-explore the whole
+   app, so they carry smaller budgets (guest `/my-list`: depth 2 — the entry
+   lands on the login wall itself; member/premium `/account/plan`: depth 5 —
+   the plan page is hop 2 and the upgrade-confirm stage hop 3 of the
+   post-login walk). `--depth` on the CLI overrides every walk's depth.
 2. Walk the determinism role (`member`) a second time from its **primary**
    entry path (`/`): both walks must observe **identical screen_id sets**
    (the sandbox's latency is seeded, the walker is deterministic — any diff
@@ -49,6 +56,19 @@ Per run (depth 6, fresh sandbox **and** fresh browser per walk):
 3. Judge: per-role coverage vs. its threshold, all `mustDiscover` entries,
    determinism, crashes. **Any** failure exits nonzero — a missing
    `mustDiscover` entry fails the gate even if every coverage ratio passes.
+
+### Parallel walks (`--jobs N`)
+
+Walks are independent — each boots its own sandbox on its own port with its
+own browser — so `--jobs N` (default 1 = sequential) runs up to N of them at
+once. The walker drives **sync** Playwright, which must never be shared
+across threads, so parallelism is process-level: each walk runs in its own
+spawn-based worker process. The harness preassigns a distinct port per walk
+before any worker starts (no allocation races), collects results and
+re-orders them into the fixed plan order before writing `raw.jsonl`, so the
+output line order and the judged verdict are identical to a sequential run.
+A crashed walk still fails the gate with its error visible. CI runs
+`--jobs 3` (ubuntu-latest has 4 vCPUs), which fits the 30-minute job budget.
 
 ### Merging semantics
 
@@ -70,9 +90,12 @@ transition graph.
 One JSON object per line:
 
 - Line 1 — `{"kind": "meta", "schema": 2, "image": …, "server_cmd": …,
-  "run_date": …, "walker_version": …, "depth": …, "judge_config": …,
+  "run_date": …, "walker_version": …, "depth": …,
+  "walk_depths": {walk_label: depth}, "jobs": …, "judge_config": …,
   "roles": […], "entry_paths": {role: […]}, "determinism_role": …,
-  "determinism_entry_path": …}`. The date comes from `--run-date` (no hidden
+  "determinism_entry_path": …}`. `depth` is the config-wide default;
+  `walk_depths` records the resolved per-walk depth (after per-entry
+  overrides and `--depth`). The date comes from `--run-date` (no hidden
   clock state).
 - Then one line per observation (`"kind": "observation"` plus all
   `RawObservation` fields) and one per transition (`"kind": "transition"`
@@ -97,7 +120,8 @@ fresh server process per walk on an ephemeral port and waits for `/healthz`):
   --manifest ~/Projects/streamly-sandbox/ground-truth/manifest.json \
   --config acceptance/streamly-sandbox.json \
   --run-date "$(date -u +%F)" \
-  --out raw.jsonl
+  --out raw.jsonl \
+  --jobs 3
 ```
 
 The harness sets `PORT` in the child's environment (and substitutes `{port}`
