@@ -36,13 +36,18 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
+      # --jobs 3: walks are independent (fresh container + browser each) and
+      # ubuntu-latest has 4 vCPUs; 3 parallel walks fit the 30-minute budget
+      # with headroom. Output order is plan-fixed, so raw.jsonl and the
+      # verdict are identical to a sequential run.
       - name: Run sandbox acceptance
         run: |
           python scripts/sandbox_acceptance.py \
             --image "$SANDBOX_IMAGE" \
             --config acceptance/streamly-sandbox.json \
             --run-date "$(date -u +%F)" \
-            --out raw.jsonl
+            --out raw.jsonl \
+            --jobs 3
 
       - name: Upload raw walk output
         if: always()
