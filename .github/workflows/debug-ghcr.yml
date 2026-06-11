@@ -1,0 +1,32 @@
+name: debug-ghcr
+
+# Temporary diagnostic: can this repo's GITHUB_TOKEN read the private
+# streamly-sandbox package on GHCR, and does the v0.1.0 digest pin resolve?
+# Delete this workflow once the sandbox-walk pull failure is understood.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  debug-ghcr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      IMAGE: ghcr.io/ram-de/streamly-sandbox
+      DIGEST: sha256:abdeb699118e99271363c0ea705a8142cbd1e55debb80211e7e0830892b9aaff
+    steps:
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Inspect by tag
+        run: docker manifest inspect "$IMAGE:v0.1.0" -v | head -40 || echo "BY-TAG FAILED (see above)"
+
+      - name: Inspect by digest
+        run: docker manifest inspect "$IMAGE@$DIGEST" -v | head -40 || echo "BY-DIGEST FAILED (see above)"
+
+      - name: Pull by tag
+        run: docker pull "$IMAGE:v0.1.0" || echo "PULL BY TAG FAILED"
