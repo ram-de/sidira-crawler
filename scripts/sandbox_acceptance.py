@@ -26,9 +26,20 @@ Modes
   environment), waits for /healthz, kills the process group afterwards.
   Requires ``--manifest`` pointing at the ground-truth manifest on disk.
 
+Entry paths
+-----------
+Each role may declare several ``entry_paths`` in the judge config; every entry
+path gets its own walk on a freshly booted sandbox (and a fresh browser). For
+judging, a role's walks are MERGED for screen coverage (union of observations
+by screen_id), but transition matchers are evaluated against each individual
+walk — never against the merged graph, because stitching edges from different
+walks would fabricate paths no single walk took (login-roundtrip's downstream
+reachability must hold within one walk's transition graph).
+
 Gates (any failure exits nonzero): a role below its coverage threshold, a
 missing mustDiscover entry, a determinism mismatch (two identical walks of the
-determinism role must observe identical screen_id sets), or a walk crash.
+determinism role's primary entry path must observe identical screen_id sets),
+or a walk crash.
 
 The judge functions are pure and importable — tests/test_acceptance.py loads
 this module directly and exercises them with synthetic walks.
@@ -238,16 +249,64 @@ def validate_config(manifest: dict, config: dict) -> None:
     missing = [t for t in must_transitions if t not in config.get("transition_matchers", {})]
     if missing:
         raise SystemExit(f"judge config has no transition matcher for: {', '.join(missing)}")
+    for role, spec in config["roles"].items():
+        paths = spec.get("entry_paths")
+        if paths is None:
+            continue
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or not all(isinstance(p, str) and p.startswith("/") for p in paths)
+        ):
+            raise SystemExit(
+                f"role {role!r}: entry_paths must be a non-empty list of '/'-prefixed paths"
+            )
 
 
-def evaluate_role(manifest: dict, config: dict, role: str, walk: dict | None) -> dict:
-    """Score one role's walk against every manifest screen visible to it."""
+def role_entry_paths(config: dict, role: str) -> list[str]:
+    """Entry paths for one role's walks; one fresh-sandbox walk per path.
+    Defaults to the config-wide ``entry_path`` (itself defaulting to "/")."""
+    paths = config["roles"][role].get("entry_paths")
+    return list(paths) if paths else [config.get("entry_path", "/")]
+
+
+def merge_walks(walks: dict[str, dict]) -> dict:
+    """Union of one role's per-entry-path walks — for SCREEN coverage only.
+
+    Observations are united by (screen_id, url) — NOT screen_id alone: the
+    same screen_id can be observed at different URLs across walks (the login
+    wall at /login?next=… digests identically to the plain /login page), and
+    a url_contains matcher needs the variant that carries its evidence.
+    Transitions are united by (from, to, trigger). Both keep entry-path order
+    (first occurrence wins). Transition matchers must NOT run on the merged
+    dict: edges stitched from different walks would fabricate paths no single
+    walk took (e.g. a login-roundtrip whose next= evidence and downstream
+    reachability come from two unrelated walks).
+    """
+    merged_obs: dict[tuple[str, str], dict] = {}
+    merged_trs: dict[tuple[str, str, str], dict] = {}
+    for w in walks.values():
+        for o in w.get("observations", []):
+            merged_obs.setdefault((o["screen_id"], o.get("url", "")), o)
+        for t in w.get("transitions", []):
+            key = (t["from_screen_id"], t["to_screen_id"], t["trigger"])
+            merged_trs.setdefault(key, t)
+    return {
+        "observations": list(merged_obs.values()),
+        "transitions": list(merged_trs.values()),
+    }
+
+
+def evaluate_role(manifest: dict, config: dict, role: str, walks: dict[str, dict] | None) -> dict:
+    """Score one role's walks (keyed by entry path, merged for screen
+    coverage) against every manifest screen visible to it."""
+    merged = merge_walks(walks) if walks else None
     rows = []
     for screen in manifest["screens"]:
         if role not in screen["roles"]:
             continue
         matcher = config["screen_matchers"][screen["id"]]
-        evidence = match_screen(matcher, walk) if walk is not None else None
+        evidence = match_screen(matcher, merged) if merged is not None else None
         rows.append(
             {
                 "id": screen["id"],
@@ -272,9 +331,13 @@ def evaluate_role(manifest: dict, config: dict, role: str, walk: dict | None) ->
     }
 
 
-def evaluate_must_discover(manifest: dict, config: dict, walks: dict[str, dict]) -> list[dict]:
+def evaluate_must_discover(
+    manifest: dict, config: dict, walks: dict[str, dict[str, dict]]
+) -> list[dict]:
     """Check every mustDiscover entry against the walks of the roles that the
-    manifest says can reach it. Found in any one such walk counts."""
+    manifest says can reach it. Found in any one such walk counts. Screens are
+    checked against a role's merged walks; transitions against each individual
+    walk (a transition path must exist within a single walk's graph)."""
     screens_by_id = {s["id"]: s for s in manifest["screens"]}
     transitions_by_id = {t["id"]: t for t in manifest["transitions"]}
     results = []
@@ -291,12 +354,16 @@ def evaluate_must_discover(manifest: dict, config: dict, walks: dict[str, dict])
         evidence = None
         evidence_role = None
         for role in spec["roles"]:
-            walk = walks.get(role)
-            if walk is None:
+            role_walks = walks.get(role)
+            if not role_walks:
                 continue
-            evidence = fn(matcher, walk)
+            candidates = [merge_walks(role_walks)] if kind == "screen" else list(role_walks.values())
+            for candidate in candidates:
+                evidence = fn(matcher, candidate)
+                if evidence is not None:
+                    evidence_role = role
+                    break
             if evidence is not None:
-                evidence_role = role
                 break
         results.append(
             {
@@ -328,17 +395,21 @@ def compare_determinism(first: dict | None, second: dict | None) -> dict:
 def judge(
     manifest: dict,
     config: dict,
-    walks: dict[str, dict],
+    walks: dict[str, dict[str, dict]],
     determinism_rewalk: dict | None,
     crashes: dict[str, str],
 ) -> dict:
-    """Aggregate all gates into one verdict dict."""
+    """Aggregate all gates into one verdict dict. ``walks`` is keyed by role,
+    then by entry path."""
     det_role = config.get("determinism_role", "member")
+    det_path = role_entry_paths(config, det_role)[0]
     roles = [
         evaluate_role(manifest, config, role, walks.get(role)) for role in config["roles"]
     ]
     must = evaluate_must_discover(manifest, config, walks)
-    determinism = compare_determinism(walks.get(det_role), determinism_rewalk)
+    determinism = compare_determinism(
+        (walks.get(det_role) or {}).get(det_path), determinism_rewalk
+    )
     passed = (
         all(r["passed"] for r in roles)
         and all(m["found"] for m in must)
@@ -350,6 +421,7 @@ def judge(
         "must_discover": must,
         "determinism": determinism,
         "determinism_role": det_role,
+        "determinism_path": det_path,
         "crashes": crashes,
         "passed": passed,
     }
@@ -382,7 +454,10 @@ def render_report(verdict: dict, timings: dict[str, float] | None = None) -> str
             out(f"  {entry['id']} ({entry['kind']}): MISSING")
     out("")
     det = verdict["determinism"]
-    out(f"=== determinism ({verdict['determinism_role']} walked twice) ===")
+    out(
+        f"=== determinism ({verdict['determinism_role']} walked twice "
+        f"from {verdict.get('determinism_path', '/')}) ==="
+    )
     if not det.get("comparable", True):
         out("  NOT COMPARABLE (a walk crashed) -> FAIL")
     elif det["passed"]:
@@ -443,7 +518,10 @@ class ImageSandbox:
 
     def boot(self, label: str) -> str:
         port = _free_port()
-        self._name = f"sandbox-walk-{label}-{port}-{os.getpid()}"
+        # Walk labels carry "@" and "/" (role@entry_path) — not valid in
+        # docker container names.
+        safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", label).strip("-") or "walk"
+        self._name = f"sandbox-walk-{safe}-{port}-{os.getpid()}"
         subprocess.run(
             [
                 "docker", "run", "--detach",
@@ -547,18 +625,24 @@ def run_walk(sandbox, label: str, role: str, creds: dict, entry_path: str, depth
 def write_raw_jsonl(
     out_path: Path,
     meta: dict,
-    labelled_walks: list[tuple[str, str, dict]],
+    labelled_walks: list[tuple[str, str, str, dict]],
 ) -> None:
     """raw.jsonl: a meta header line, then one line per observation and per
-    transition, each tagged with role, walk label, and kind."""
+    transition, each tagged with role, entry path, walk label, and kind."""
     with out_path.open("w", encoding="utf-8") as fh:
         fh.write(json.dumps({"kind": "meta", **meta}, ensure_ascii=False) + "\n")
-        for label, role, walk in labelled_walks:
+        for label, role, entry_path, walk in labelled_walks:
             for obs in walk.get("observations", []):
-                record = {"kind": "observation", "walk": label, "role": role, **obs}
+                record = {
+                    "kind": "observation", "walk": label, "role": role,
+                    "entry_path": entry_path, **obs,
+                }
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             for tr in walk.get("transitions", []):
-                record = {"kind": "transition", "walk": label, "role": role, **tr}
+                record = {
+                    "kind": "transition", "walk": label, "role": role,
+                    "entry_path": entry_path, **tr,
+                }
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
@@ -589,7 +673,6 @@ def main(argv: list[str] | None = None) -> int:
 
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
     depth = args.depth if args.depth is not None else config.get("depth", 6)
-    entry_path = config.get("entry_path", "/")
     det_role = config.get("determinism_role", "member")
 
     if args.server_cmd and not args.manifest:
@@ -617,33 +700,39 @@ def main(argv: list[str] | None = None) -> int:
 
     from sidira_crawler import __version__ as walker_version
 
-    # Plan: one walk per role, plus a second determinism walk. Fresh sandbox
-    # and fresh browser per walk.
-    plan = [(role, role) for role in config["roles"]]
-    plan.append((f"{det_role}-determinism", det_role))
+    # Plan: one walk per (role, entry path), plus a second determinism walk of
+    # the determinism role's primary entry path. Fresh sandbox and fresh
+    # browser per walk.
+    det_path = role_entry_paths(config, det_role)[0]
+    plan: list[tuple[str, str, str]] = []
+    for role in config["roles"]:
+        for path in role_entry_paths(config, role):
+            plan.append((f"{role}@{path}", role, path))
+    determinism_label = f"{det_role}-determinism@{det_path}"
+    plan.append((determinism_label, det_role, det_path))
 
-    walks: dict[str, dict] = {}
+    walks: dict[str, dict[str, dict]] = {}
     rewalk: dict | None = None
     crashes: dict[str, str] = {}
     timings: dict[str, float] = {}
-    labelled: list[tuple[str, str, dict]] = []
+    labelled: list[tuple[str, str, str, dict]] = []
 
-    for label, role in plan:
+    for label, role, path in plan:
         creds = config["roles"][role]
         started = time.monotonic()
         try:
-            walk = run_walk(make_sandbox(), label, role, creds, entry_path, depth)
+            walk = run_walk(make_sandbox(), label, role, creds, path, depth)
         except Exception as exc:  # crash gate: report, keep judging the rest
             crashes[label] = f"{type(exc).__name__}: {exc}"
             timings[label] = time.monotonic() - started
             print(f"[sandbox-acceptance] walk {label} CRASHED: {crashes[label]}", file=sys.stderr)
             continue
         timings[label] = time.monotonic() - started
-        labelled.append((label, role, walk))
-        if label == f"{det_role}-determinism":
+        labelled.append((label, role, path, walk))
+        if label == determinism_label:
             rewalk = walk
         else:
-            walks[role] = walk
+            walks.setdefault(role, {})[path] = walk
         print(
             f"[sandbox-acceptance] walk {label}: {len(walk['observations'])} screens, "
             f"{len(walk['transitions'])} transitions in {timings[label]:.1f}s",
@@ -651,7 +740,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     meta = {
-        "schema": 1,
+        "schema": 2,
         "image": args.image or None,
         "server_cmd": args.server_cmd or None,
         "run_date": args.run_date,
@@ -659,7 +748,9 @@ def main(argv: list[str] | None = None) -> int:
         "depth": depth,
         "judge_config": str(args.config),
         "roles": list(config["roles"]),
+        "entry_paths": {role: role_entry_paths(config, role) for role in config["roles"]},
         "determinism_role": det_role,
+        "determinism_entry_path": det_path,
     }
     write_raw_jsonl(Path(args.out), meta, labelled)
 

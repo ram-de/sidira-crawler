@@ -315,38 +315,60 @@ def _full_member_walk():
 def test_evaluate_role_threshold_pass_at_exact_boundary():
     # 4/5 = 0.8 meets the 0.8 threshold exactly.
     w = walk([obs(f"/{s}::s1") for s in "abcd"])
-    result = sa.evaluate_role(MANIFEST, CONFIG, "member", w)
+    result = sa.evaluate_role(MANIFEST, CONFIG, "member", {"/": w})
     assert result["matched"] == 4 and result["total"] == 5
     assert result["passed"] is True
 
 
 def test_evaluate_role_threshold_fail_below_boundary():
     w = walk([obs(f"/{s}::s1") for s in "abc"])
-    result = sa.evaluate_role(MANIFEST, CONFIG, "member", w)
+    result = sa.evaluate_role(MANIFEST, CONFIG, "member", {"/": w})
     assert result["ratio"] == pytest.approx(0.6)
     assert result["passed"] is False
 
 
 def test_evaluate_role_only_counts_screens_visible_to_role():
     w = walk([obs("/a::s1")])
-    result = sa.evaluate_role(MANIFEST, CONFIG, "guest", w)
+    result = sa.evaluate_role(MANIFEST, CONFIG, "guest", {"/": w})
     assert result["total"] == 1 and result["passed"] is True
 
 
 def test_evaluate_role_crashed_walk_scores_zero():
     result = sa.evaluate_role(MANIFEST, CONFIG, "member", None)
     assert result["matched"] == 0 and result["passed"] is False
+    # All of a role's walks crashed -> empty dict scores the same way.
+    result = sa.evaluate_role(MANIFEST, CONFIG, "member", {})
+    assert result["matched"] == 0 and result["passed"] is False
+
+
+def test_evaluate_role_merges_screen_coverage_across_entry_paths():
+    # 3 screens from "/" and 2 different ones from "/b": together 5/5.
+    first = walk([obs(f"/{s}::s1") for s in "abc"])
+    second = walk([obs(f"/{s}::s1") for s in "de"])
+    result = sa.evaluate_role(MANIFEST, CONFIG, "member", {"/": first, "/b": second})
+    assert result["matched"] == 5 and result["passed"] is True
 
 
 def test_must_discover_found_and_missing():
-    results = sa.evaluate_must_discover(MANIFEST, CONFIG, {"member": _full_member_walk()})
+    results = sa.evaluate_must_discover(MANIFEST, CONFIG, {"member": {"/": _full_member_walk()}})
     assert all(r["found"] for r in results)
     # Remove the scroll transition: t-scroll must report missing.
     bare = walk([obs(f"/{s}::s1") for s in "abcde"])
-    results = sa.evaluate_must_discover(MANIFEST, CONFIG, {"member": bare})
+    results = sa.evaluate_must_discover(MANIFEST, CONFIG, {"member": {"/": bare}})
     by_id = {r["id"]: r for r in results}
     assert by_id["b"]["found"] is True
     assert by_id["t-scroll"]["found"] is False
+
+
+def test_must_discover_transition_found_in_any_single_walk():
+    # The scroll transition only happens in the secondary entry path's walk.
+    bare = walk([obs(f"/{s}::s1") for s in "abcde"])
+    scrolly = walk([obs("/a::s1"), obs("/b::s2")], [tr("/a::s1", "/b::s2", "scroll feed")])
+    results = sa.evaluate_must_discover(
+        MANIFEST, CONFIG, {"member": {"/": bare, "/a": scrolly}}
+    )
+    by_id = {r["id"]: r for r in results}
+    assert by_id["t-scroll"]["found"] is True
 
 
 def test_missing_must_discover_fails_verdict_despite_full_coverage():
@@ -354,9 +376,75 @@ def test_missing_must_discover_fails_verdict_despite_full_coverage():
     # is absent, so the overall verdict must fail.
     member = walk([obs(f"/{s}::s1") for s in "abcde"])
     guest = walk([obs("/a::s1")])
-    verdict = sa.judge(MANIFEST, CONFIG, {"guest": guest, "member": member}, member, {})
+    verdict = sa.judge(
+        MANIFEST, CONFIG, {"guest": {"/": guest}, "member": {"/": member}}, member, {}
+    )
     assert all(r["passed"] for r in verdict["roles"])
     assert verdict["passed"] is False
+
+
+# --------------------------------------------------------------------------
+# Entry paths and walk merging
+# --------------------------------------------------------------------------
+
+
+def test_role_entry_paths_defaults_and_explicit():
+    config = {"entry_path": "/start", "roles": {"guest": {}, "member": {"entry_paths": ["/", "/a"]}}}
+    assert sa.role_entry_paths(config, "guest") == ["/start"]
+    assert sa.role_entry_paths(config, "member") == ["/", "/a"]
+    assert sa.role_entry_paths({"roles": {"guest": {}}}, "guest") == ["/"]
+
+
+def test_merge_walks_unions_observations_and_transitions():
+    first = walk([obs("/a::s1"), obs("/b::s2")], [tr("/a::s1", "/b::s2", "click link 'b'")])
+    second = walk([obs("/a::s1"), obs("/c::s3")], [tr("/a::s1", "/b::s2", "click link 'b'"),
+                                                   tr("/a::s1", "/c::s3", "click link 'c'")])
+    merged = sa.merge_walks({"/": first, "/c": second})
+    assert {o["screen_id"] for o in merged["observations"]} == {"/a::s1", "/b::s2", "/c::s3"}
+    assert len(merged["observations"]) == 3  # deduped by (screen_id, url)
+    assert len(merged["transitions"]) == 2  # deduped by (from, to, trigger)
+
+
+def test_merge_walks_keeps_url_variants_of_the_same_screen_id():
+    # The login wall (/login?next=…) digests to the same screen_id as the
+    # plain /login page. Merging must keep BOTH observations: deduping by
+    # screen_id alone would let the first walk's plain variant shadow the
+    # wall variant, and a url_contains matcher would miss real evidence.
+    plain = walk([obs("/login::login+s1", url="http://x/login")])
+    wall = walk([obs("/login::login+s1", url="http://x/login?next=%2Fmy-list")])
+    merged = sa.merge_walks({"/": plain, "/my-list": wall})
+    assert len(merged["observations"]) == 2
+    matcher = {"kind": "observation", "route": "/login", "flags": ["login"],
+               "url_contains": "next="}
+    assert sa.match_screen(matcher, merged) == "/login::login+s1"
+
+
+def test_login_roundtrip_must_hold_within_a_single_walk():
+    # Walk A carries the next= param but never reaches the target; walk B
+    # reaches the target but has no login wall. Neither walk alone satisfies
+    # the round-trip, and merging must not stitch them into a fake pass.
+    walk_a = _roundtrip_walk("http://x/login?next=%2Fbrowse", "http://x/profiles",
+                             downstream_ok=False)
+    walk_b = walk(
+        [obs("/profiles::chooser+s2", url="http://x/profiles"), obs("/browse::s3")],
+        [tr("/profiles::chooser+s2", "/browse::s3", "select first option 'p'")],
+    )
+    manifest = {
+        "screens": [],
+        "transitions": [{"id": "t-rt", "from": "login", "to": "browse", "roles": ["member"]}],
+        "mustDiscover": [{"id": "t-rt", "kind": "transition", "why": "round-trip"}],
+    }
+    config = {
+        "roles": {"member": {"threshold": 0.8}},
+        "screen_matchers": {},
+        "transition_matchers": {"t-rt": MATCHER},
+    }
+    results = sa.evaluate_must_discover(manifest, config, {"member": {"/": walk_a, "/b": walk_b}})
+    assert results[0]["found"] is False
+    # The same evidence inside ONE walk passes.
+    whole = _roundtrip_walk("http://x/login?next=%2Fbrowse", "http://x/profiles")
+    results = sa.evaluate_must_discover(manifest, config, {"member": {"/": whole}})
+    assert results[0]["found"] is True
 
 
 def test_compare_determinism_identical_sets_pass():
@@ -382,7 +470,9 @@ def test_compare_determinism_crashed_walk_is_not_comparable():
 def test_judge_passes_when_everything_holds():
     member = _full_member_walk()
     guest = walk([obs("/a::s1")])
-    verdict = sa.judge(MANIFEST, CONFIG, {"guest": guest, "member": member}, member, {})
+    verdict = sa.judge(
+        MANIFEST, CONFIG, {"guest": {"/": guest}, "member": {"/": member}}, member, {}
+    )
     assert verdict["passed"] is True
 
 
@@ -390,8 +480,8 @@ def test_judge_fails_on_walk_crash():
     member = _full_member_walk()
     guest = walk([obs("/a::s1")])
     verdict = sa.judge(
-        MANIFEST, CONFIG, {"guest": guest, "member": member}, member,
-        {"premium": "RuntimeError: boom"},
+        MANIFEST, CONFIG, {"guest": {"/": guest}, "member": {"/": member}}, member,
+        {"premium@/": "RuntimeError: boom"},
     )
     assert verdict["passed"] is False
 
@@ -400,9 +490,36 @@ def test_judge_fails_on_determinism_mismatch():
     member = _full_member_walk()
     guest = walk([obs("/a::s1")])
     rewalk = walk([obs(f"/{s}::s1") for s in "abcd"], [tr("/a::s1", "/b::s2", "scroll feed")])
-    verdict = sa.judge(MANIFEST, CONFIG, {"guest": guest, "member": member}, rewalk, {})
+    verdict = sa.judge(
+        MANIFEST, CONFIG, {"guest": {"/": guest}, "member": {"/": member}}, rewalk, {}
+    )
     assert verdict["determinism"]["passed"] is False
     assert verdict["passed"] is False
+
+
+def test_judge_compares_determinism_against_primary_entry_path_walk():
+    # The determinism re-walk matches the PRIMARY ("/" first-listed) walk, not
+    # the secondary entry path's walk.
+    config = {**CONFIG, "roles": {**CONFIG["roles"],
+                                  "member": {**CONFIG["roles"]["member"],
+                                             "entry_paths": ["/", "/b"]}}}
+    primary = _full_member_walk()
+    secondary = walk([obs("/b::s2")])
+    guest = walk([obs("/a::s1")])
+    verdict = sa.judge(
+        MANIFEST, config,
+        {"guest": {"/": guest}, "member": {"/": primary, "/b": secondary}},
+        primary, {},
+    )
+    assert verdict["determinism_path"] == "/"
+    assert verdict["determinism"]["passed"] is True
+    # Re-walk equal to the SECONDARY walk must fail the gate.
+    verdict = sa.judge(
+        MANIFEST, config,
+        {"guest": {"/": guest}, "member": {"/": primary, "/b": secondary}},
+        secondary, {},
+    )
+    assert verdict["determinism"]["passed"] is False
 
 
 def test_validate_config_rejects_matcher_gaps():
@@ -412,6 +529,15 @@ def test_validate_config_rejects_matcher_gaps():
     no_transition = {**CONFIG, "transition_matchers": {}}
     with pytest.raises(SystemExit):
         sa.validate_config(MANIFEST, no_transition)
+
+
+def test_validate_config_rejects_malformed_entry_paths():
+    for bad in ([], "/a", ["relative"], [1]):
+        broken = {**CONFIG, "roles": {**CONFIG["roles"],
+                                      "member": {**CONFIG["roles"]["member"],
+                                                 "entry_paths": bad}}}
+        with pytest.raises(SystemExit):
+            sa.validate_config(MANIFEST, broken)
 
 
 # --------------------------------------------------------------------------
@@ -425,6 +551,10 @@ def test_shipped_config_parses_and_has_known_matcher_kinds():
     config_path = Path(__file__).resolve().parent.parent / "acceptance" / "streamly-sandbox.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     assert set(config["roles"]) == {"guest", "member", "premium"}
+    for role, spec in config["roles"].items():
+        paths = sa.role_entry_paths(config, role)
+        assert paths and all(p.startswith("/") for p in paths)
+        assert paths[0] == "/", "every role's primary entry path is the app root"
     for matcher in config["screen_matchers"].values():
         assert matcher.get("kind", "observation") == "observation"
     for matcher in config["transition_matchers"].values():

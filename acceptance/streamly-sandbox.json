@@ -8,13 +8,34 @@
     "Every manifest screen id needs an entry in screen_matchers; every mustDiscover",
     "transition id needs an entry in transition_matchers. The harness hard-errors on gaps."
   ],
-  "entry_path": "/",
+  "_entry_paths_comment": [
+    "Each entry path is its own walk on a freshly booted sandbox; a role's walks",
+    "are merged (screen-id union) for screen coverage, while transition matchers",
+    "must hold within a single walk. /my-list (guest) exercises the guarded-URL",
+    "login wall + next= round-trip; /account/plan (member, premium) puts the",
+    "plan/upgrade/downloads screens within depth reach of the post-login walk."
+  ],
   "depth": 6,
   "determinism_role": "member",
   "roles": {
-    "guest": {"username": null, "password": null, "threshold": 0.8},
-    "member": {"username": "member@streamly.test", "password": "watchmore", "threshold": 0.8},
-    "premium": {"username": "premium@streamly.test", "password": "watchmore4k", "threshold": 0.8}
+    "guest": {
+      "username": null,
+      "password": null,
+      "threshold": 0.8,
+      "entry_paths": ["/", "/my-list"]
+    },
+    "member": {
+      "username": "member@streamly.test",
+      "password": "watchmore",
+      "threshold": 0.8,
+      "entry_paths": ["/", "/account/plan"]
+    },
+    "premium": {
+      "username": "premium@streamly.test",
+      "password": "watchmore4k",
+      "threshold": 0.8,
+      "entry_paths": ["/", "/account/plan"]
+    }
   },
   "screen_matchers": {
     "landing": {
