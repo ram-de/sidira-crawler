@@ -39,6 +39,11 @@ include = ["sidira_crawler*"]
 line-length = 100
 target-version = "py311"
 
+[tool.pytest.ini_options]
+markers = [
+    "walker: browser-driven walker tests against the hermetic fixture app",
+]
+
 [tool.black]
 line-length = 100
 target-version = ["py311"]

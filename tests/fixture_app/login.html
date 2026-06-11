@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful — Sign in</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <nav>
+    <a class="nav-link" href="/" data-testid="nav-home">Home</a>
+  </nav>
+</header>
+<main>
+  <h1>Sign in to Plateful</h1>
+  <form id="login-form">
+    <label>Email
+      <input type="email" name="email" data-testid="login-email">
+    </label>
+    <label>Password
+      <input type="password" name="password" data-testid="login-password">
+    </label>
+    <button type="submit" data-testid="login-submit">Sign in</button>
+  </form>
+  <div id="login-error"></div>
+</main>
+<script src="/consent.js"></script>
+<script>
+(function () {
+  var form = document.getElementById('login-form');
+
+  // Controlled inputs, framework-style. This reproduces how React (and kin)
+  // handle forms: component STATE — not the DOM — is the source of truth, and
+  // state only updates when an input event reports a value that differs from
+  // an instance-level value tracker. A bot that assigns `el.value = v` updates
+  // the tracker too, so its synthetic input event is deduped as "no change"
+  // and the form submits empty state. Only the native prototype setter (or
+  // real typing) gets past this — the walker regressed on exactly this once.
+  var state = { email: '', password: '' };
+  form.querySelectorAll('input').forEach(function (el) {
+    var tracker = el.value;
+    var proto = Object.getPrototypeOf(el).constructor.prototype;
+    var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    Object.defineProperty(el, 'value', {
+      get: function () { return desc.get.call(el); },
+      set: function (v) { tracker = String(v); desc.set.call(el, v); },
+    });
+    el.addEventListener('input', function () {
+      var current = desc.get.call(el);
+      if (current === tracker) return; // deduped, like React's inputValueTracking
+      tracker = current;
+      state[el.name] = current;
+    });
+  });
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var email = state.email;
+    var password = state.password;
+    if (email === 'cook@example.test' && password === 'sourdough') {
+      document.cookie = 'plateful_auth=1; path=/';
+      var next = new URLSearchParams(location.search).get('next') || '/';
+      location.href = '/profiles.html?next=' + encodeURIComponent(next);
+    } else {
+      var err = document.getElementById('login-error');
+      err.innerHTML = '<p class="error" data-testid="login-error">' +
+        'That email and password combination is not on the guest list.</p>';
+    }
+  });
+})();
+</script>
+</body>
+</html>

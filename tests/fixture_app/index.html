@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<!-- JS-only SPA shell: the body is empty until the client renders. -->
+<div id="app"></div>
+<script src="/consent.js"></script>
+<script>
+  setTimeout(function () {
+    var app = document.getElementById('app');
+    app.innerHTML =
+      '<header><nav>' +
+      '<a class="nav-link" href="/feed.html" data-testid="nav-feed">Recipe feed</a>' +
+      '<a class="nav-link" href="/members.html" data-testid="nav-members">Member kitchen</a>' +
+      '<a class="nav-link" href="/billing.html" data-testid="nav-billing">Billing</a>' +
+      '<a class="nav-link" href="/plan.html" data-testid="nav-plan">Plan your week</a>' +
+      '<a class="nav-link" href="/about.html" data-testid="nav-about">About</a>' +
+      '</nav></header>' +
+      '<main data-testid="home-main">' +
+      '<h1>Plateful</h1>' +
+      '<p>Seasonal home cooking, one shared table at a time. Browse this week\'s recipe ' +
+      'feed, or sign in to the member kitchen to plan your week of dinners with the ' +
+      'community pantry.</p>' +
+      '<p>Every recipe is tested twice by two different home cooks before it lands in ' +
+      'the feed, so you can trust the timings and the seasoning.</p>' +
+      '<button class="save-btn" data-testid="save-later">Save for later</button>' +
+      '</main>' +
+      '<div id="toast-region" aria-live="polite" data-testid="toast-region"></div>';
+    document.querySelector('[data-testid="save-later"]').addEventListener('click', function () {
+      var t = document.createElement('div');
+      t.className = 'toast';
+      t.textContent = 'Saved to your list';
+      document.getElementById('toast-region').appendChild(t);
+      setTimeout(function () { t.remove(); }, 900);
+    });
+  }, 150);
+</script>
+</body>
+</html>

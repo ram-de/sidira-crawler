@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful — Member kitchen</title>
+  <script>
+    // Login wall: bounce to the sign-in page, remembering where we came from.
+    if (!document.cookie.includes('plateful_auth=1')) {
+      location.replace('/login.html?next=' + encodeURIComponent('/members.html'));
+    }
+  </script>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <nav>
+    <a class="nav-link" href="/" data-testid="nav-home">Home</a>
+    <a class="nav-link" href="/feed.html" data-testid="nav-feed">Recipe feed</a>
+    <a class="nav-link" href="/about.html" data-testid="nav-about">About</a>
+  </nav>
+</header>
+<main>
+  <h1>Member kitchen</h1>
+  <p data-testid="members-welcome">Welcome back. Your weekly plan is warming in the oven.</p>
+  <p>This week the community pantry is heavy on root vegetables and preserved lemons, so
+    the plan leans into braises and bright salads. Swap any dinner for a feed favourite
+    whenever you like.</p>
+</main>
+<script src="/consent.js"></script>
+</body>
+</html>

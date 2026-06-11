@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful — Who is cooking?</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <h1>Who is cooking tonight?</h1>
+  <button class="profile-chip" data-testid="profile-alex">Alex</button>
+  <button class="profile-chip" data-testid="profile-jordan">Jordan</button>
+  <button class="profile-chip" data-testid="profile-sam">Sam</button>
+</main>
+<script src="/consent.js"></script>
+<script>
+(function () {
+  var next = new URLSearchParams(location.search).get('next') || '/';
+  var chips = document.querySelectorAll('.profile-chip');
+  for (var i = 0; i < chips.length; i++) {
+    (function (chip) {
+      chip.addEventListener('click', function () {
+        document.cookie = 'plateful_profile=' + chip.textContent.toLowerCase() + '; path=/';
+        location.href = next;
+      });
+    })(chips[i]);
+  }
+})();
+</script>
+</body>
+</html>

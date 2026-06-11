@@ -27,7 +27,10 @@ class CapabilityConfig(BaseModel):
     name: str
     entry_points: list[str]
     roles: list[str]
-    max_hops: int = 3
+    # Depth budget in user-action hops from each entry point. The longest flow
+    # the walker must capture today is 4 hops; 6 sits comfortably above that,
+    # so a missed screen is a walker failure, never budget exhaustion.
+    max_hops: int = 6
 
 
 class CustomerConfig(BaseModel):

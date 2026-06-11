@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful — Plan your week</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <nav>
+    <a class="nav-link" href="/" data-testid="nav-home">Home</a>
+  </nav>
+</header>
+<main>
+  <h1>Plan your week</h1>
+  <!-- Two-step wizard on ONE url. Step 2 swaps the fields in place via JS
+       without changing route, dialog, overlay, or any other flag — only the
+       page STRUCTURE (testids, form-control types) changes. Pins that the
+       walker treats same-route structural states as distinct screens. -->
+  <form id="wizard">
+    <div id="wizard-step"></div>
+  </form>
+</main>
+<script src="/consent.js"></script>
+<script>
+(function () {
+  var step = document.getElementById('wizard-step');
+  function renderStep2() {
+    step.innerHTML =
+      '<label>Which night? <select name="night" data-testid="wizard-night">' +
+      '<option>Monday</option><option>Wednesday</option><option>Friday</option>' +
+      '</select></label> ' +
+      '<label>Servings <input type="number" name="servings" ' +
+      'data-testid="wizard-servings"></label> ' +
+      '<button type="button" data-testid="wizard-finish">Finish</button>';
+    step.querySelector('[data-testid="wizard-finish"]')
+      .addEventListener('click', function () { location.href = '/'; });
+  }
+  function renderStep1() {
+    step.innerHTML =
+      '<label>What are you cooking first? ' +
+      '<input type="text" name="dish" data-testid="wizard-dish"></label> ' +
+      '<button type="button" data-testid="wizard-next">Next</button>';
+    step.querySelector('[data-testid="wizard-next"]')
+      .addEventListener('click', renderStep2);
+  }
+  renderStep1();
+})();
+</script>
+</body>
+</html>
