@@ -172,7 +172,8 @@
     "t-browse-scroll-lazy": {
       "kind": "scroll-growth",
       "trigger": "scroll feed",
-      "route": "/browse"
+      "route": "/browse",
+      "to_copy_regex": "Trending Now"
     }
   },
   "_evidence_notes": {
@@ -188,6 +189,7 @@
     "browse-lazy-rows": "'Trending Now' is a page-2 themed collection row (server/catalog.js) — present only after lazy rows + infinite scroll pages render.",
     "browse-end-of-catalog": "data-testid='end-of-catalog' in src/pages/Browse.jsx.",
     "browse-4k-row": "row name '4K Ultra HD' (server/catalog.js fourKRow) leads page 1 for premium only; on /browse members only ever see plain '4K' poster badges.",
+    "t-browse-scroll-lazy": "'Trending Now' is a page-2 themed collection row from server/catalog.js, present only after lazy rows + infinite-scroll pages render — requiring it in the scroll's to-observation (to_copy_regex) proves the lazy content actually appeared; a screen-digest change alone could be any DOM mutation.",
     "title-modal": "role=dialog aria-modal in src/components/TitleModal.jsx at deep-linkable /title/:id.",
     "watch": "'Now playing ·' quality line in src/pages/Watch.jsx; seen in smoke walks.",
     "plan-upgrade-confirm": "'Confirm upgrade' button only in the confirm stage of src/pages/Plan.jsx.",

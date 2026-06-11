@@ -241,7 +241,10 @@ def test_login_roundtrip_does_not_loop_on_cyclic_graphs():
 # scroll-growth matcher
 # --------------------------------------------------------------------------
 
+# Evidence-free variant: exercises the trigger/route/digest-change logic alone
+# (validate_config refuses to ship a scroll-growth matcher without to_* keys).
 SCROLL = {"kind": "scroll-growth", "trigger": "scroll feed", "route": "/browse"}
+SCROLL_EVIDENCE = {**SCROLL, "to_copy_regex": "Trending Now"}
 
 
 def test_scroll_growth_matches_state_changing_scroll():
@@ -263,6 +266,48 @@ def test_scroll_growth_respects_route():
 def test_scroll_growth_requires_scroll_trigger():
     w = walk(transitions=[tr("/browse::s1", "/browse::s2", "click link 'More'")])
     assert sa.match_scroll_growth(SCROLL, w) is None
+
+
+def test_scroll_growth_digest_change_alone_is_not_evidence():
+    # The to-screen digest changed, but the to-observation carries none of the
+    # lazy content the matcher demands — any DOM mutation could do that.
+    w = walk(
+        [obs("/browse::s1"), obs("/browse::exhausted+s2", visible_copy=["same rows"])],
+        [tr("/browse::s1", "/browse::exhausted+s2", "scroll feed")],
+    )
+    assert sa.match_scroll_growth(SCROLL_EVIDENCE, w) is None
+
+
+def test_scroll_growth_to_copy_evidence_in_to_observation_matches():
+    w = walk(
+        [obs("/browse::s1"), obs("/browse::exhausted+s2", visible_copy=["Trending Now"])],
+        [tr("/browse::s1", "/browse::exhausted+s2", "scroll feed")],
+    )
+    assert sa.match_scroll_growth(SCROLL_EVIDENCE, w) is not None
+
+
+def test_scroll_growth_to_evidence_on_from_observation_does_not_count():
+    w = walk(
+        [obs("/browse::s1", visible_copy=["Trending Now"]), obs("/browse::exhausted+s2")],
+        [tr("/browse::s1", "/browse::exhausted+s2", "scroll feed")],
+    )
+    assert sa.match_scroll_growth(SCROLL_EVIDENCE, w) is None
+
+
+def test_scroll_growth_missing_to_observation_does_not_match():
+    w = walk([obs("/browse::s1")], [tr("/browse::s1", "/browse::exhausted+s2", "scroll feed")])
+    assert sa.match_scroll_growth(SCROLL_EVIDENCE, w) is None
+
+
+def test_scroll_growth_to_testid_and_to_flags_evidence():
+    w = walk(
+        [obs("/browse::exhausted+s2", data_testids=["end-of-catalog"])],
+        [tr("/browse::s1", "/browse::exhausted+s2", "scroll feed")],
+    )
+    assert sa.match_scroll_growth({**SCROLL, "to_testid": "end-of-catalog"}, w) is not None
+    assert sa.match_scroll_growth({**SCROLL, "to_flags": ["exhausted"]}, w) is not None
+    assert sa.match_scroll_growth({**SCROLL, "to_testid": "hero"}, w) is None
+    assert sa.match_scroll_growth({**SCROLL, "to_flags": ["dialog"]}, w) is None
 
 
 # --------------------------------------------------------------------------
@@ -300,14 +345,15 @@ CONFIG = {
         "e": {"route": "/e"},
     },
     "transition_matchers": {
-        "t-scroll": {"kind": "scroll-growth", "trigger": "scroll feed", "route": "/a"},
+        "t-scroll": {"kind": "scroll-growth", "trigger": "scroll feed", "route": "/a",
+                     "to_copy_regex": "Lazy row"},
     },
 }
 
 
 def _full_member_walk():
     return walk(
-        [obs(f"/{s}::s1") for s in "abcde"],
+        [obs(f"/{s}::s1") for s in "acde"] + [obs("/b::s2", visible_copy=["Lazy row"])],
         [tr("/a::s1", "/b::s2", "scroll feed")],
     )
 
@@ -363,7 +409,8 @@ def test_must_discover_found_and_missing():
 def test_must_discover_transition_found_in_any_single_walk():
     # The scroll transition only happens in the secondary entry path's walk.
     bare = walk([obs(f"/{s}::s1") for s in "abcde"])
-    scrolly = walk([obs("/a::s1"), obs("/b::s2")], [tr("/a::s1", "/b::s2", "scroll feed")])
+    scrolly = walk([obs("/a::s1"), obs("/b::s2", visible_copy=["Lazy row"])],
+                   [tr("/a::s1", "/b::s2", "scroll feed")])
     results = sa.evaluate_must_discover(
         MANIFEST, CONFIG, {"member": {"/": bare, "/a": scrolly}}
     )
@@ -587,6 +634,68 @@ def test_validate_config_rejects_malformed_depth_override_entries():
             sa.validate_config(MANIFEST, broken)
 
 
+def _config_with_screen_matcher(matcher):
+    return {**CONFIG, "screen_matchers": {**CONFIG["screen_matchers"], "a": matcher}}
+
+
+def test_validate_config_rejects_empty_screen_matcher():
+    # An empty matcher matches the FIRST observation of any walk.
+    with pytest.raises(SystemExit, match="positive predicate"):
+        sa.validate_config(MANIFEST, _config_with_screen_matcher({}))
+
+
+def test_validate_config_rejects_absence_only_screen_matcher():
+    for matcher in (
+        {"flags_absent": ["dialog"]},
+        {"testid_absent": "end-of-catalog"},
+        {"flags_absent": ["dialog"], "testid_absent": "end-of-catalog"},
+        {"flags": [], "flags_absent": ["dialog"]},  # empty flags list is not positive
+    ):
+        with pytest.raises(SystemExit, match="positive predicate"):
+            sa.validate_config(MANIFEST, _config_with_screen_matcher(matcher))
+
+
+def test_validate_config_accepts_route_plus_absence_matcher():
+    # browse-eager style: route is the positive anchor, absences refine it.
+    sa.validate_config(MANIFEST, _config_with_screen_matcher(
+        {"route": "/a", "flags_absent": ["exhausted", "dialog"],
+         "testid_absent": "end-of-catalog"}))
+
+
+def test_validate_config_rejects_scroll_growth_without_to_evidence():
+    # Without to_* evidence the matcher passes on ANY digest change.
+    broken = {**CONFIG, "transition_matchers": {
+        "t-scroll": {"kind": "scroll-growth", "trigger": "scroll feed", "route": "/a"}}}
+    with pytest.raises(SystemExit, match="scroll-growth"):
+        sa.validate_config(MANIFEST, broken)
+    empty_flags = {**CONFIG, "transition_matchers": {
+        "t-scroll": {"kind": "scroll-growth", "trigger": "scroll feed", "route": "/a",
+                     "to_flags": []}}}
+    with pytest.raises(SystemExit, match="scroll-growth"):
+        sa.validate_config(MANIFEST, empty_flags)
+
+
+def test_validate_config_rejects_duplicate_entry_paths_within_role():
+    for dup in (
+        ["/", "/"],
+        ["/a", {"path": "/a", "depth": 2}],
+        ["/a", "/a/"],  # normalized: trailing slash is the same walk key
+    ):
+        broken = {**CONFIG, "roles": {**CONFIG["roles"],
+                                      "member": {**CONFIG["roles"]["member"],
+                                                 "entry_paths": dup}}}
+        with pytest.raises(SystemExit, match="duplicate entry path"):
+            sa.validate_config(MANIFEST, broken)
+
+
+def test_validate_config_allows_same_entry_path_across_roles():
+    config = {**CONFIG, "roles": {
+        "guest": {**CONFIG["roles"]["guest"], "entry_paths": ["/", "/a"]},
+        "member": {**CONFIG["roles"]["member"], "entry_paths": ["/", "/a"]},
+    }}
+    sa.validate_config(MANIFEST, config)  # must not raise
+
+
 # --------------------------------------------------------------------------
 # Parallel-walk plumbing: plan-order output and crash propagation
 # --------------------------------------------------------------------------
@@ -667,6 +776,123 @@ def test_preassign_ports_are_distinct():
     assert len(set(ports)) == 8
 
 
+def test_boot_with_retry_recovers_on_a_fresh_port(capsys):
+    # Preassigned port taken twice; the third attempt (second fresh ephemeral
+    # port) succeeds. Retries are logged to stderr.
+    booted_ports = []
+
+    def boot(label, port=None):
+        booted_ports.append(port)
+        if len(booted_ports) < 3:
+            raise RuntimeError(f"address already in use: {port}")
+        return f"http://127.0.0.1:{port}"
+
+    fresh = iter([5001, 5002])
+    base_url = sa.boot_with_retry(boot, "member@/", 4000,
+                                  attempts=3, fresh_port=lambda: next(fresh))
+    assert base_url == "http://127.0.0.1:5002"
+    assert booted_ports == [4000, 5001, 5002]
+    err = capsys.readouterr().err
+    assert err.count("retrying on a fresh ephemeral port") == 2
+
+
+def test_boot_with_retry_gives_up_after_bounded_attempts():
+    booted_ports = []
+
+    def boot(label, port=None):
+        booted_ports.append(port)
+        raise RuntimeError("address already in use")
+
+    with pytest.raises(RuntimeError, match="address already in use"):
+        sa.boot_with_retry(boot, "member@/", 4000, attempts=3, fresh_port=lambda: 9999)
+    assert len(booted_ports) == 3  # bounded: never loops forever
+
+
+def test_normalize_walk_urls_strips_origin_keeps_path_query_fragment():
+    w = walk([
+        obs("/login::login+s1", url="http://127.0.0.1:63684/login?next=%2Fbrowse"),
+        obs("/a::s2", url="http://127.0.0.1:63684/a#frag"),
+        obs("/ext::s3", url="https://elsewhere.example/x"),  # foreign origin untouched
+    ])
+    out = sa.normalize_walk_urls(w, "http://127.0.0.1:63684")
+    urls = [o["url"] for o in out["observations"]]
+    assert urls == [
+        "http://sandbox/login?next=%2Fbrowse",
+        "http://sandbox/a#frag",
+        "https://elsewhere.example/x",
+    ]
+
+
+def test_normalized_walks_are_port_independent_and_raw_jsonl_is_port_free(tmp_path):
+    # The same walk observed on two different ports must normalize to the same
+    # bytes — a boot retry landing on another port cannot break determinism.
+    def walk_on(port):
+        return sa.normalize_walk_urls(
+            walk([obs("/a::s1", url=f"http://127.0.0.1:{port}/a?x=1")]),
+            f"http://127.0.0.1:{port}",
+        )
+
+    first, second = walk_on(4001), walk_on(59999)
+    assert first == second
+    out = tmp_path / "raw.jsonl"
+    sa.write_raw_jsonl(out, {"schema": 2}, [("member@/", "member", "/", first)])
+    text = out.read_text(encoding="utf-8")
+    assert "4001" not in text and "127.0.0.1" not in text
+
+
+def test_jobs_equivalence_sequential_vs_parallel_byte_identical(tmp_path):
+    # The same task plan through sequential (jobs=1) and parallel collection,
+    # with a fake execute that completes out of plan order, must yield the
+    # same results, the same assembled judge inputs, the same verdict, and
+    # byte-identical raw.jsonl.
+    import copy
+    import time as time_mod
+    from concurrent.futures import ThreadPoolExecutor
+
+    tasks = [
+        _task("guest@/", "guest", "/"),
+        _task("member@/", "member", "/"),
+        _task("member@/a", "member", "/a"),
+        _task("member-determinism@/", "member", "/"),
+    ]
+    walks_by_label = {
+        "guest@/": walk([obs("/a::s1")]),
+        "member@/": _full_member_walk(),
+        "member@/a": walk([obs("/b::s2", visible_copy=["Lazy row"])]),
+        "member-determinism@/": _full_member_walk(),
+    }
+    # Earlier plan entries take longer: completion order is the REVERSE of
+    # plan order in the parallel run.
+    delays = {"guest@/": 0.15, "member@/": 0.1, "member@/a": 0.05,
+              "member-determinism@/": 0.0}
+
+    def fake_execute(task):
+        time_mod.sleep(delays[task["label"]])
+        return _result(task["label"], copy.deepcopy(walks_by_label[task["label"]]),
+                       seconds=1.0)
+
+    sequential = sa.run_plan(tasks, 1, execute=fake_execute)
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        parallel = sa.collect_parallel(tasks, pool, fake_execute)
+
+    assert [r["label"] for r in sequential] == [t["label"] for t in tasks]
+    assert sequential == parallel
+
+    raw_bytes = {}
+    verdicts = {}
+    for name, results in (("sequential", sequential), ("parallel", parallel)):
+        walks_by_role, rewalk, crashes, _timings, labelled = sa.assemble_results(
+            tasks, results, "member-determinism@/"
+        )
+        out = tmp_path / f"{name}.jsonl"
+        sa.write_raw_jsonl(out, {"schema": 2}, labelled)
+        raw_bytes[name] = out.read_bytes()
+        verdicts[name] = sa.judge(MANIFEST, CONFIG, walks_by_role, rewalk, crashes)
+    assert raw_bytes["sequential"] == raw_bytes["parallel"]
+    assert verdicts["sequential"] == verdicts["parallel"]
+    assert verdicts["sequential"]["passed"] is True
+
+
 # --------------------------------------------------------------------------
 # The shipped judge config stays in lockstep with the shipped manifest schema
 # --------------------------------------------------------------------------
@@ -684,8 +910,13 @@ def test_shipped_config_parses_and_has_known_matcher_kinds():
         assert paths[0] == "/", "every role's primary entry path is the app root"
     for matcher in config["screen_matchers"].values():
         assert matcher.get("kind", "observation") == "observation"
+        assert any(matcher.get(k) for k in sa._POSITIVE_OBS_PREDICATES), \
+            "every shipped screen matcher carries a positive predicate"
     for matcher in config["transition_matchers"].values():
         assert matcher["kind"] in {"transition", "login-roundtrip", "scroll-growth"}
+        if matcher["kind"] == "scroll-growth":
+            assert any(matcher.get(k) for k in sa._TO_EVIDENCE_KEYS), \
+                "shipped scroll-growth matchers carry to-observation evidence"
 
 
 def test_shipped_config_entry_depths():

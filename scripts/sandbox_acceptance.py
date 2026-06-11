@@ -47,9 +47,13 @@ already boots its own sandbox and its own browser, so walks are independent;
 the walker drives *sync* Playwright, which must not be shared across threads,
 so parallelism is PROCESS-level (a spawn-based worker pool). Ports are
 preassigned per walk (bound simultaneously, so they are distinct) before any
-worker starts, results are collected and re-ordered into fixed plan order
-before raw.jsonl is written, and a crashed walk fails the gate with its error
-visible — the judged result is identical to a sequential run.
+worker starts; preassignment is a plan, not a reservation, so each worker
+retries its boot on a fresh ephemeral port if the planned one was taken
+(``boot_with_retry``). Sandbox origins (host:port) are normalized out of all
+observation URLs before raw.jsonl is written, results are collected and
+re-ordered into fixed plan order, and a crashed walk fails the gate with its
+error visible — the judged result (and raw.jsonl, byte for byte) is identical
+to a sequential run.
 
 Gates (any failure exits nonzero): a role below its coverage threshold, a
 missing mustDiscover entry, a determinism mismatch (two identical walks of the
@@ -219,9 +223,38 @@ def match_login_roundtrip(matcher: dict, walk: dict) -> str | None:
     return None
 
 
+#: ``to_*`` evidence predicates a transition matcher may carry: each is checked
+#: against the observations (in the SAME walk) of the transition's to-screen,
+#: by stripping the prefix and reusing the observation-matcher predicate.
+_TO_EVIDENCE_KEYS = {"to_copy_regex": "copy_regex", "to_testid": "testid", "to_flags": "flags"}
+
+
+def to_evidence_matcher(matcher: dict) -> dict:
+    """The observation matcher implied by a transition matcher's ``to_*``
+    evidence predicates (empty when it carries none)."""
+    return {okey: matcher[tkey] for tkey, okey in _TO_EVIDENCE_KEYS.items() if tkey in matcher}
+
+
+def to_evidence_holds(matcher: dict, walk: dict, to_screen_id: str) -> bool:
+    """True when at least one observation in the SAME walk whose screen_id is
+    the transition's to-screen satisfies the matcher's ``to_*`` evidence
+    predicates. Vacuously true when the matcher carries none — validation
+    decides which matcher kinds must carry evidence."""
+    evidence = to_evidence_matcher(matcher)
+    if not evidence:
+        return True
+    return any(
+        o["screen_id"] == to_screen_id and match_observation(evidence, o)
+        for o in walk.get("observations", [])
+    )
+
+
 def match_scroll_growth(matcher: dict, walk: dict) -> str | None:
     """Scroll growth: a scroll transition on the given route whose to-screen
-    differs from its from-screen (i.e. scrolling changed the screen state)."""
+    differs from its from-screen (i.e. scrolling changed the screen state) AND
+    whose to-observation carries the configured ``to_*`` evidence that the
+    lazy content actually appeared — a screen-digest change alone could be any
+    DOM mutation, so it is not evidence of grown content."""
     trigger = matcher.get("trigger", "scroll feed")
     for tr in walk.get("transitions", []):
         if tr["trigger"] != trigger:
@@ -229,6 +262,8 @@ def match_scroll_growth(matcher: dict, walk: dict) -> str | None:
         if tr["from_screen_id"] == tr["to_screen_id"]:
             continue
         if "route" in matcher and screen_id_parts(tr["from_screen_id"])[0] != matcher["route"]:
+            continue
+        if not to_evidence_holds(matcher, walk, tr["to_screen_id"]):
             continue
         return f"{tr['from_screen_id']} -> {tr['to_screen_id']} ({tr['trigger']})"
     return None
@@ -254,9 +289,16 @@ def match_transition(matcher: dict, walk: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+#: Observation-matcher predicates that assert PRESENCE of evidence. A matcher
+#: made only of absence predicates (flags_absent / testid_absent) — or of
+#: nothing at all — would match the first observation of any walk.
+_POSITIVE_OBS_PREDICATES = ("route", "flags", "url_contains", "testid", "copy_regex")
+
+
 def validate_config(manifest: dict, config: dict) -> None:
     """Hard-error on judge-config gaps so screens can't silently score as
-    unmatchable (or worse, get quietly skipped)."""
+    unmatchable (or worse, get quietly skipped) and matchers can't silently
+    pass without evidence."""
     missing = [s["id"] for s in manifest["screens"] if s["id"] not in config["screen_matchers"]]
     if missing:
         raise SystemExit(f"judge config has no screen matcher for: {', '.join(missing)}")
@@ -264,6 +306,31 @@ def validate_config(manifest: dict, config: dict) -> None:
     missing = [t for t in must_transitions if t not in config.get("transition_matchers", {})]
     if missing:
         raise SystemExit(f"judge config has no transition matcher for: {', '.join(missing)}")
+    # Every screen matcher must assert at least one POSITIVE predicate — an
+    # empty or absence-only matcher would match the first observation it sees.
+    evidence_free = [
+        sid
+        for sid, matcher in config["screen_matchers"].items()
+        if not any(matcher.get(key) for key in _POSITIVE_OBS_PREDICATES)
+    ]
+    if evidence_free:
+        raise SystemExit(
+            "screen matchers must carry at least one positive predicate "
+            f"({', '.join(_POSITIVE_OBS_PREDICATES)}): {', '.join(evidence_free)}"
+        )
+    # A scroll-growth matcher without to-observation evidence would pass on
+    # ANY digest change caused by scrolling, not on the lazy content itself.
+    no_evidence = [
+        tid
+        for tid, matcher in config.get("transition_matchers", {}).items()
+        if matcher.get("kind") == "scroll-growth"
+        and not any(matcher.get(key) for key in _TO_EVIDENCE_KEYS)
+    ]
+    if no_evidence:
+        raise SystemExit(
+            "scroll-growth matchers must carry at least one to-observation evidence "
+            f"predicate ({', '.join(_TO_EVIDENCE_KEYS)}): {', '.join(no_evidence)}"
+        )
     for role, spec in config["roles"].items():
         paths = spec.get("entry_paths")
         if paths is None:
@@ -273,6 +340,19 @@ def validate_config(manifest: dict, config: dict) -> None:
                 f"role {role!r}: entry_paths entries must be '/'-prefixed path strings "
                 "or {'path': '/...', 'depth': N >= 1} objects (non-empty list)"
             )
+        # Walks are keyed by role@entry_path — duplicate normalized paths
+        # within a role would silently collide into one walk slot.
+        seen: dict[str, str] = {}
+        for item in paths:
+            path = item if isinstance(item, str) else item["path"]
+            norm = path.rstrip("/") or "/"
+            if norm in seen:
+                raise SystemExit(
+                    f"role {role!r}: duplicate entry path {path!r} "
+                    f"(normalizes to {norm!r}, already declared as {seen[norm]!r}) — "
+                    "walks are keyed by role@entry_path"
+                )
+            seen[norm] = path
 
 
 def _entry_ok(item) -> bool:
@@ -547,10 +627,15 @@ def _free_port() -> int:
 
 
 def _preassign_ports(count: int) -> list[int]:
-    """Reserve ``count`` distinct free ports up front — all sockets are held
+    """Preassign ``count`` distinct free ports up front — all sockets are held
     open simultaneously, so the kernel cannot hand the same port out twice.
     Parallel walks each get their own preassigned port, which removes the
-    pick-then-bind race two concurrent workers would otherwise have."""
+    pick-then-bind race two concurrent workers would otherwise have. This is
+    a plan, NOT a reservation: the sockets are closed before the workers boot,
+    so another process can still grab a port in the gap — workers handle that
+    with ``boot_with_retry`` (fresh ephemeral port per retry). Ports never
+    appear in raw.jsonl (``normalize_walk_urls``), so a retried port cannot
+    break byte-determinism."""
     socks: list[socket.socket] = []
     try:
         for _ in range(count):
@@ -590,20 +675,22 @@ class ImageSandbox:
         # docker container names.
         safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", label).strip("-") or "walk"
         self._name = f"sandbox-walk-{safe}-{port}-{os.getpid()}"
-        subprocess.run(
-            [
-                "docker", "run", "--detach",
-                "--name", self._name,
-                "--publish", f"127.0.0.1:{port}:{self.container_port}",
-                self.image,
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-        base_url = f"http://127.0.0.1:{port}"
         try:
+            subprocess.run(
+                [
+                    "docker", "run", "--detach",
+                    "--name", self._name,
+                    "--publish", f"127.0.0.1:{port}:{self.container_port}",
+                    self.image,
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            base_url = f"http://127.0.0.1:{port}"
             _wait_healthz(base_url)
         except Exception:
+            # A failed publish can leave a created-but-not-started container
+            # behind; remove it so a port retry starts clean.
             self.stop()
             raise
         return base_url
@@ -670,16 +757,62 @@ class ServerCmdSandbox:
         self._proc = None
 
 
+def boot_with_retry(boot, label: str, port: int | None, attempts: int = 3,
+                    fresh_port=None) -> str:
+    """Boot a sandbox with a bounded retry. Preassigned ports are a plan, not
+    a reservation — another process can bind the port between preassignment
+    and boot (docker publish failure, or the server dies instantly and
+    /healthz never answers). On failure, pick a FRESH ephemeral port inside
+    the worker and try again, up to ``attempts`` boots total. ``boot`` is the
+    sandbox's boot callable (injectable for hermetic tests), ``fresh_port``
+    defaults to binding port 0."""
+    fresh_port = fresh_port or _free_port
+    for attempt in range(1, attempts + 1):
+        try:
+            return boot(label, port=port)
+        except Exception as exc:
+            if attempt == attempts:
+                raise
+            print(
+                f"[sandbox-acceptance] walk {label}: boot attempt {attempt}/{attempts} "
+                f"on port {port} failed ({type(exc).__name__}: {exc}); "
+                "retrying on a fresh ephemeral port",
+                file=sys.stderr,
+            )
+            port = fresh_port()
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+#: Fixed origin written to raw.jsonl in place of the booted sandbox's real
+#: http://127.0.0.1:<port> — ports are an orchestration detail and must never
+#: leak into the output (they would break jobs=1 vs jobs>1 byte-determinism
+#: the moment a boot retry lands on a different port).
+SANDBOX_ORIGIN = "http://sandbox"
+
+
+def normalize_walk_urls(walk_data: dict, base_url: str) -> dict:
+    """Rewrite the booted sandbox's origin out of every observation URL so
+    raw walk output is byte-identical regardless of which port the walk got.
+    Paths, query strings (e.g. ``?next=...``), and fragments are preserved."""
+    origin = base_url.rstrip("/")
+    for obs in walk_data.get("observations", []):
+        url = obs.get("url", "")
+        if url.startswith(origin):
+            obs["url"] = SANDBOX_ORIGIN + url[len(origin):]
+    return walk_data
+
+
 def run_walk(
     sandbox, label: str, role: str, creds: dict, entry_path: str, depth: int,
     port: int | None = None,
 ) -> dict:
-    """Boot a fresh sandbox, run one walk with a fresh browser, tear down."""
+    """Boot a fresh sandbox (retrying on a fresh port if the preassigned one
+    was taken), run one walk with a fresh browser, tear down."""
     from dataclasses import asdict
 
     from sidira_crawler.walker import walk
 
-    base_url = sandbox.boot(label, port=port)
+    base_url = boot_with_retry(sandbox.boot, label, port)
     try:
         raw = walk(
             base_url.rstrip("/") + entry_path,
@@ -688,7 +821,7 @@ def run_walk(
             password=creds.get("password"),
             depth=depth,
         )
-        return asdict(raw)
+        return normalize_walk_urls(asdict(raw), base_url)
     finally:
         sandbox.stop()
 
@@ -738,38 +871,56 @@ def order_results(tasks: list[dict], by_label: dict[str, dict]) -> list[dict]:
     return [by_label[task["label"]] for task in tasks]
 
 
-def run_plan(tasks: list[dict], jobs: int) -> list[dict]:
+def collect_sequential(tasks: list[dict], execute) -> list[dict]:
+    """Run every task inline, one at a time, in plan order."""
+    results = []
+    for task in tasks:
+        result = execute(task)
+        _report_progress(result)
+        results.append(result)
+    return results
+
+
+def collect_parallel(tasks: list[dict], pool, execute) -> list[dict]:
+    """Submit every task to ``pool`` and fold completed results back into PLAN
+    order — completion order must never leak into the output. ``pool`` only
+    needs ``submit`` (hermetic tests pass a thread pool with a fake execute;
+    production passes a spawn-based process pool)."""
+    from concurrent.futures import as_completed
+
+    by_label: dict[str, dict] = {}
+    futures = {pool.submit(execute, task): task["label"] for task in tasks}
+    for future in as_completed(futures):
+        label = futures[future]
+        try:
+            result = future.result()
+        except Exception as exc:  # worker process died (signal, OOM, …)
+            result = {"label": label, "walk": None,
+                      "error": f"{type(exc).__name__}: {exc}", "seconds": 0.0}
+        by_label[result["label"]] = result
+        _report_progress(result)
+    return order_results(tasks, by_label)
+
+
+def run_plan(tasks: list[dict], jobs: int, execute=None) -> list[dict]:
     """Execute every planned walk; return results in PLAN order regardless of
     completion order. ``jobs=1`` runs inline (sequential, no workers); with
     ``jobs>1`` each walk runs in its own spawn-based worker process — the
     walker drives sync Playwright, which must never be shared across threads,
     so parallelism is process-level and every walk keeps its own sandbox,
-    browser, and preassigned port."""
+    browser, and preassigned port. ``execute`` defaults to
+    ``execute_walk_task`` (top-level, picklable for the spawn pool) and is
+    injectable so hermetic tests can prove jobs=1/jobs>1 equivalence."""
+    execute = execute if execute is not None else execute_walk_task
     if jobs == 1:
-        results = []
-        for task in tasks:
-            result = execute_walk_task(task)
-            _report_progress(result)
-            results.append(result)
-        return results
+        return collect_sequential(tasks, execute)
 
     import multiprocessing
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures import ProcessPoolExecutor
 
-    by_label: dict[str, dict] = {}
     context = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(max_workers=jobs, mp_context=context) as pool:
-        futures = {pool.submit(execute_walk_task, task): task["label"] for task in tasks}
-        for future in as_completed(futures):
-            label = futures[future]
-            try:
-                result = future.result()
-            except Exception as exc:  # worker process died (signal, OOM, …)
-                result = {"label": label, "walk": None,
-                          "error": f"{type(exc).__name__}: {exc}", "seconds": 0.0}
-            by_label[result["label"]] = result
-            _report_progress(result)
-    return order_results(tasks, by_label)
+        return collect_parallel(tasks, pool, execute)
 
 
 def assemble_results(
