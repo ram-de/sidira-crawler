@@ -1,0 +1,672 @@
+#!/usr/bin/env python3
+"""Sandbox acceptance harness — runs the walker against a customer sandbox and
+judges the raw output against the sandbox's ground-truth manifest.
+
+Two-part gate
+-------------
+1. The walker ENGINE (``sidira_crawler``) is generic: it must contain zero
+   customer-specific selectors, routes, or copy.
+2. The acceptance JUDGE (this script + a judge config JSON) is allowed to know
+   the sandbox: it scores walk outcomes against the ground-truth manifest
+   shipped inside the sandbox. All sandbox knowledge lives in the judge config
+   (e.g. ``acceptance/streamly-sandbox.json``) — this script itself is a
+   sandbox-agnostic harness.
+
+Matching is deterministic: every matcher is a data-driven predicate over the
+raw walk output (routes, screen-id flag tokens, data-testids, visible copy,
+URLs, transition triggers). There is no fuzzy scoring.
+
+Modes
+-----
+- ``--image <ref>``: CI mode. Boots a FRESH docker container per walk on an
+  ephemeral port, waits for /healthz, removes the container afterwards. The
+  ground-truth manifest is extracted from the first booted container.
+- ``--server-cmd '<cmd>'``: local mode. Starts a fresh server process per walk
+  (``{port}`` in the command is substituted; ``PORT`` is also set in the
+  environment), waits for /healthz, kills the process group afterwards.
+  Requires ``--manifest`` pointing at the ground-truth manifest on disk.
+
+Gates (any failure exits nonzero): a role below its coverage threshold, a
+missing mustDiscover entry, a determinism mismatch (two identical walks of the
+determinism role must observe identical screen_id sets), or a walk crash.
+
+The judge functions are pure and importable — tests/test_acceptance.py loads
+this module directly and exercises them with synthetic walks.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+# ---------------------------------------------------------------------------
+# Pure judge: screen-id parsing and matchers
+# ---------------------------------------------------------------------------
+
+#: Trailing structural-digest token in a walker screen_id, e.g. ``s2ac4f9``.
+_DIGEST_RE = re.compile(r"^s[0-9a-f]{6}$")
+
+
+def screen_id_parts(screen_id: str) -> tuple[str, frozenset[str]]:
+    """Split a walker screen_id into (route, flag tokens).
+
+    ``/browse::exhausted+s2ac4f9`` -> (``/browse``, {``exhausted``}). The
+    structural digest token is dropped — judges match on routes and semantic
+    flags, never on the digest.
+    """
+    route, _, state = screen_id.partition("::")
+    flags = frozenset(t for t in state.split("+") if t and not _DIGEST_RE.match(t))
+    return route, flags
+
+
+def normalize_route(path: str) -> str:
+    """Collapse likely-ID path segments the same way the walker reports routes
+    (digit-bearing segments become ``:id``): ``/watch/t-101`` -> ``/watch/:id``.
+
+    Reimplemented here on purpose — the judge never imports engine internals.
+    """
+    path = path.split("?")[0].split("#")[0]
+    segments = [s for s in path.split("/") if s]
+    return "/" + "/".join(":id" if any(c.isdigit() for c in s) else s for s in segments)
+
+
+def _obs_text(obs: dict) -> str:
+    return "\n".join(list(obs.get("headings", [])) + list(obs.get("visible_copy", [])))
+
+
+def match_observation(matcher: dict, obs: dict) -> bool:
+    """Evaluate one observation matcher against one observation. All present
+    predicate keys must hold (AND semantics)."""
+    route, flags = screen_id_parts(obs["screen_id"])
+    if "route" in matcher and matcher["route"] != route:
+        return False
+    if any(f not in flags for f in matcher.get("flags", [])):
+        return False
+    if any(f in flags for f in matcher.get("flags_absent", [])):
+        return False
+    if "url_contains" in matcher and matcher["url_contains"] not in obs.get("url", ""):
+        return False
+    if "testid" in matcher and matcher["testid"] not in obs.get("data_testids", []):
+        return False
+    if "testid_absent" in matcher and matcher["testid_absent"] in obs.get("data_testids", []):
+        return False
+    if "copy_regex" in matcher and not re.search(matcher["copy_regex"], _obs_text(obs)):
+        return False
+    return True
+
+
+def match_screen(matcher: dict, walk: dict) -> str | None:
+    """Return the screen_id of the first observation matching, else None."""
+    for obs in walk.get("observations", []):
+        if match_observation(matcher, obs):
+            return obs["screen_id"]
+    return None
+
+
+def match_transition_generic(matcher: dict, walk: dict) -> str | None:
+    """Plain transition matcher: trigger regex + from/to route + flag predicates."""
+    for tr in walk.get("transitions", []):
+        if "trigger_regex" in matcher and not re.search(matcher["trigger_regex"], tr["trigger"]):
+            continue
+        from_route, from_flags = screen_id_parts(tr["from_screen_id"])
+        to_route, to_flags = screen_id_parts(tr["to_screen_id"])
+        if "from_route" in matcher and matcher["from_route"] != from_route:
+            continue
+        if "to_route" in matcher and matcher["to_route"] != to_route:
+            continue
+        if any(f not in from_flags for f in matcher.get("from_flags", [])):
+            continue
+        if any(f not in to_flags for f in matcher.get("to_flags", [])):
+            continue
+        return f"{tr['from_screen_id']} -> {tr['to_screen_id']} ({tr['trigger']})"
+    return None
+
+
+def match_login_roundtrip(matcher: dict, walk: dict) -> str | None:
+    """Login ?next= round-trip: there exists a login-submit transition out of a
+    login screen where a ``next=`` parameter is carried through the submit, and
+    the decoded next target route is reachable downstream of the submit in the
+    transition graph.
+
+    The parameter may sit on either end of the submit transition: on the login
+    screen's own URL (the classic ``/login?next=...`` wall) or on the screen
+    the submit lands on (the app forwards the sanitized next to its post-login
+    interstitial, e.g. ``/profiles?next=...``). Both are the same evidence —
+    redirect state survived the login submit — and the engine's one-observation-
+    per-screen_id dedupe (query strings don't fork screen identity) means the
+    wall URL may only be visible on the landing side. Either way the decoded
+    target must actually be reached downstream; nothing passes on the param
+    alone.
+    """
+    trigger = matcher.get("trigger", "submit login form")
+    param = matcher.get("param", "next")
+    login_flag = matcher.get("login_flag", "login")
+    obs_by_id = {o["screen_id"]: o for o in walk.get("observations", [])}
+    downstream: dict[str, list[str]] = {}
+    for tr in walk.get("transitions", []):
+        downstream.setdefault(tr["from_screen_id"], []).append(tr["to_screen_id"])
+
+    def param_value(screen_id: str) -> str | None:
+        obs = obs_by_id.get(screen_id)
+        if obs is None:
+            return None
+        values = parse_qs(urlsplit(obs.get("url", "")).query).get(param)
+        return values[0] if values and values[0] else None
+
+    for tr in walk.get("transitions", []):
+        if tr["trigger"] != trigger:
+            continue
+        from_obs = obs_by_id.get(tr["from_screen_id"])
+        if from_obs is None:
+            continue
+        _, flags = screen_id_parts(from_obs["screen_id"])
+        if login_flag not in flags:
+            continue
+        next_value = param_value(tr["from_screen_id"]) or param_value(tr["to_screen_id"])
+        if next_value is None:
+            continue
+        target_route = normalize_route(next_value)
+        # BFS downstream of the submit's landing screen.
+        seen: set[str] = set()
+        stack = [tr["to_screen_id"]]
+        while stack:
+            sid = stack.pop()
+            if sid in seen:
+                continue
+            seen.add(sid)
+            if screen_id_parts(sid)[0] == target_route:
+                return (
+                    f"{tr['from_screen_id']} -> {tr['to_screen_id']} "
+                    f"(next={next_value!r} reaches {target_route} via {sid})"
+                )
+            stack.extend(downstream.get(sid, ()))
+    return None
+
+
+def match_scroll_growth(matcher: dict, walk: dict) -> str | None:
+    """Scroll growth: a scroll transition on the given route whose to-screen
+    differs from its from-screen (i.e. scrolling changed the screen state)."""
+    trigger = matcher.get("trigger", "scroll feed")
+    for tr in walk.get("transitions", []):
+        if tr["trigger"] != trigger:
+            continue
+        if tr["from_screen_id"] == tr["to_screen_id"]:
+            continue
+        if "route" in matcher and screen_id_parts(tr["from_screen_id"])[0] != matcher["route"]:
+            continue
+        return f"{tr['from_screen_id']} -> {tr['to_screen_id']} ({tr['trigger']})"
+    return None
+
+
+_TRANSITION_MATCHERS = {
+    "transition": match_transition_generic,
+    "login-roundtrip": match_login_roundtrip,
+    "scroll-growth": match_scroll_growth,
+}
+
+
+def match_transition(matcher: dict, walk: dict) -> str | None:
+    kind = matcher.get("kind", "transition")
+    fn = _TRANSITION_MATCHERS.get(kind)
+    if fn is None:
+        raise ValueError(f"unknown transition matcher kind: {kind!r}")
+    return fn(matcher, walk)
+
+
+# ---------------------------------------------------------------------------
+# Pure judge: coverage, mustDiscover, determinism, verdict
+# ---------------------------------------------------------------------------
+
+
+def validate_config(manifest: dict, config: dict) -> None:
+    """Hard-error on judge-config gaps so screens can't silently score as
+    unmatchable (or worse, get quietly skipped)."""
+    missing = [s["id"] for s in manifest["screens"] if s["id"] not in config["screen_matchers"]]
+    if missing:
+        raise SystemExit(f"judge config has no screen matcher for: {', '.join(missing)}")
+    must_transitions = [e["id"] for e in manifest.get("mustDiscover", []) if e["kind"] == "transition"]
+    missing = [t for t in must_transitions if t not in config.get("transition_matchers", {})]
+    if missing:
+        raise SystemExit(f"judge config has no transition matcher for: {', '.join(missing)}")
+
+
+def evaluate_role(manifest: dict, config: dict, role: str, walk: dict | None) -> dict:
+    """Score one role's walk against every manifest screen visible to it."""
+    rows = []
+    for screen in manifest["screens"]:
+        if role not in screen["roles"]:
+            continue
+        matcher = config["screen_matchers"][screen["id"]]
+        evidence = match_screen(matcher, walk) if walk is not None else None
+        rows.append(
+            {
+                "id": screen["id"],
+                "route": screen["route"],
+                "state": screen["state"],
+                "matched": evidence is not None,
+                "evidence": evidence,
+            }
+        )
+    matched = sum(1 for r in rows if r["matched"])
+    total = len(rows)
+    ratio = matched / total if total else 1.0
+    threshold = config["roles"][role]["threshold"]
+    return {
+        "role": role,
+        "rows": rows,
+        "matched": matched,
+        "total": total,
+        "ratio": ratio,
+        "threshold": threshold,
+        "passed": ratio >= threshold,
+    }
+
+
+def evaluate_must_discover(manifest: dict, config: dict, walks: dict[str, dict]) -> list[dict]:
+    """Check every mustDiscover entry against the walks of the roles that the
+    manifest says can reach it. Found in any one such walk counts."""
+    screens_by_id = {s["id"]: s for s in manifest["screens"]}
+    transitions_by_id = {t["id"]: t for t in manifest["transitions"]}
+    results = []
+    for entry in manifest.get("mustDiscover", []):
+        eid, kind = entry["id"], entry["kind"]
+        if kind == "screen":
+            spec = screens_by_id[eid]
+            matcher = config["screen_matchers"][eid]
+            fn = match_screen
+        else:
+            spec = transitions_by_id[eid]
+            matcher = config["transition_matchers"][eid]
+            fn = match_transition
+        evidence = None
+        evidence_role = None
+        for role in spec["roles"]:
+            walk = walks.get(role)
+            if walk is None:
+                continue
+            evidence = fn(matcher, walk)
+            if evidence is not None:
+                evidence_role = role
+                break
+        results.append(
+            {
+                "id": eid,
+                "kind": kind,
+                "found": evidence is not None,
+                "role": evidence_role,
+                "evidence": evidence,
+                "why": entry.get("why", ""),
+            }
+        )
+    return results
+
+
+def compare_determinism(first: dict | None, second: dict | None) -> dict:
+    """Two walks of the same role must observe identical screen_id sets."""
+    if first is None or second is None:
+        return {"passed": False, "only_first": [], "only_second": [], "comparable": False}
+    a = {o["screen_id"] for o in first.get("observations", [])}
+    b = {o["screen_id"] for o in second.get("observations", [])}
+    return {
+        "passed": a == b,
+        "only_first": sorted(a - b),
+        "only_second": sorted(b - a),
+        "comparable": True,
+    }
+
+
+def judge(
+    manifest: dict,
+    config: dict,
+    walks: dict[str, dict],
+    determinism_rewalk: dict | None,
+    crashes: dict[str, str],
+) -> dict:
+    """Aggregate all gates into one verdict dict."""
+    det_role = config.get("determinism_role", "member")
+    roles = [
+        evaluate_role(manifest, config, role, walks.get(role)) for role in config["roles"]
+    ]
+    must = evaluate_must_discover(manifest, config, walks)
+    determinism = compare_determinism(walks.get(det_role), determinism_rewalk)
+    passed = (
+        all(r["passed"] for r in roles)
+        and all(m["found"] for m in must)
+        and determinism["passed"]
+        and not crashes
+    )
+    return {
+        "roles": roles,
+        "must_discover": must,
+        "determinism": determinism,
+        "determinism_role": det_role,
+        "crashes": crashes,
+        "passed": passed,
+    }
+
+
+def render_report(verdict: dict, timings: dict[str, float] | None = None) -> str:
+    """Human-readable coverage report for stdout."""
+    lines: list[str] = []
+    out = lines.append
+    for result in verdict["roles"]:
+        out("")
+        out(f"=== role: {result['role']} ===")
+        width = max((len(r["id"]) for r in result["rows"]), default=10) + 2
+        for row in result["rows"]:
+            mark = "MATCHED" if row["matched"] else "missed "
+            evidence = f"  <- {row['evidence']}" if row["evidence"] else ""
+            out(f"  {row['id']:<{width}} {mark}{evidence}")
+        gate = "PASS" if result["passed"] else "FAIL"
+        out(
+            f"  coverage: {result['matched']}/{result['total']} = {result['ratio']:.3f} "
+            f"(threshold {result['threshold']}) -> {gate}"
+        )
+    out("")
+    out("=== mustDiscover ===")
+    for entry in verdict["must_discover"]:
+        if entry["found"]:
+            out(f"  {entry['id']} ({entry['kind']}): FOUND in {entry['role']} walk")
+            out(f"      {entry['evidence']}")
+        else:
+            out(f"  {entry['id']} ({entry['kind']}): MISSING")
+    out("")
+    det = verdict["determinism"]
+    out(f"=== determinism ({verdict['determinism_role']} walked twice) ===")
+    if not det.get("comparable", True):
+        out("  NOT COMPARABLE (a walk crashed) -> FAIL")
+    elif det["passed"]:
+        out("  identical screen_id sets -> PASS")
+    else:
+        out("  screen_id sets differ -> FAIL")
+        for sid in det["only_first"]:
+            out(f"    only in first walk:  {sid}")
+        for sid in det["only_second"]:
+            out(f"    only in second walk: {sid}")
+    if verdict["crashes"]:
+        out("")
+        out("=== crashes ===")
+        for label, err in verdict["crashes"].items():
+            out(f"  {label}: {err}")
+    if timings:
+        out("")
+        out("=== wall-clock ===")
+        for label, seconds in timings.items():
+            out(f"  {label}: {seconds:.1f}s")
+        out(f"  total: {sum(timings.values()):.1f}s")
+    out("")
+    out(f"ACCEPTANCE: {'PASS' if verdict['passed'] else 'FAIL'}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Orchestration: boot a fresh sandbox per walk (docker image or local command)
+# ---------------------------------------------------------------------------
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _wait_healthz(base_url: str, timeout: float = 90.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(base_url + "/healthz", timeout=2) as resp:
+                if resp.status == 200:
+                    return
+        except Exception:
+            pass
+        time.sleep(0.5)
+    raise RuntimeError(f"sandbox at {base_url} not healthy after {timeout:.0f}s")
+
+
+class ImageSandbox:
+    """One fresh docker container per walk, removed afterwards."""
+
+    def __init__(self, image: str, container_port: int = 3000) -> None:
+        self.image = image
+        self.container_port = container_port
+        self._name: str | None = None
+
+    def boot(self, label: str) -> str:
+        port = _free_port()
+        self._name = f"sandbox-walk-{label}-{port}-{os.getpid()}"
+        subprocess.run(
+            [
+                "docker", "run", "--detach",
+                "--name", self._name,
+                "--publish", f"127.0.0.1:{port}:{self.container_port}",
+                self.image,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            _wait_healthz(base_url)
+        except Exception:
+            self.stop()
+            raise
+        return base_url
+
+    def stop(self) -> None:
+        if self._name:
+            subprocess.run(
+                ["docker", "rm", "--force", self._name],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._name = None
+
+    def extract_manifest(self, manifest_path_in_image: str, dest: Path) -> None:
+        if not self._name:
+            raise RuntimeError("no running container to extract the manifest from")
+        subprocess.run(
+            ["docker", "cp", f"{self._name}:{manifest_path_in_image}", str(dest)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+
+
+class ServerCmdSandbox:
+    """One fresh local server process (group) per walk, killed afterwards."""
+
+    def __init__(self, server_cmd: str) -> None:
+        self.server_cmd = server_cmd
+        self._proc: subprocess.Popen | None = None
+
+    def boot(self, label: str) -> str:
+        port = _free_port()
+        env = dict(os.environ, PORT=str(port))
+        self._proc = subprocess.Popen(
+            self.server_cmd.replace("{port}", str(port)),
+            shell=True,
+            env=env,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            _wait_healthz(base_url)
+        except Exception:
+            self.stop()
+            raise
+        return base_url
+
+    def stop(self) -> None:
+        if self._proc is None:
+            return
+        try:
+            pgid = os.getpgid(self._proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                self._proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(pgid, signal.SIGKILL)
+                self._proc.wait(timeout=5)
+        except ProcessLookupError:
+            pass
+        self._proc = None
+
+
+def run_walk(sandbox, label: str, role: str, creds: dict, entry_path: str, depth: int) -> dict:
+    """Boot a fresh sandbox, run one walk with a fresh browser, tear down."""
+    from dataclasses import asdict
+
+    from sidira_crawler.walker import walk
+
+    base_url = sandbox.boot(label)
+    try:
+        raw = walk(
+            base_url.rstrip("/") + entry_path,
+            role,
+            username=creds.get("username"),
+            password=creds.get("password"),
+            depth=depth,
+        )
+        return asdict(raw)
+    finally:
+        sandbox.stop()
+
+
+def write_raw_jsonl(
+    out_path: Path,
+    meta: dict,
+    labelled_walks: list[tuple[str, str, dict]],
+) -> None:
+    """raw.jsonl: a meta header line, then one line per observation and per
+    transition, each tagged with role, walk label, and kind."""
+    with out_path.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "meta", **meta}, ensure_ascii=False) + "\n")
+        for label, role, walk in labelled_walks:
+            for obs in walk.get("observations", []):
+                record = {"kind": "observation", "walk": label, "role": role, **obs}
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            for tr in walk.get("transitions", []):
+                record = {"kind": "transition", "walk": label, "role": role, **tr}
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--image", help="Sandbox docker image ref (CI mode).")
+    source.add_argument(
+        "--server-cmd",
+        help="Shell command that serves the sandbox (local mode). '{port}' is "
+        "substituted and PORT is set in the environment.",
+    )
+    parser.add_argument("--config", required=True, help="Judge config JSON.")
+    parser.add_argument(
+        "--manifest",
+        help="Ground-truth manifest path (required with --server-cmd; overrides "
+        "image extraction).",
+    )
+    parser.add_argument(
+        "--manifest-path-in-image",
+        default="/app/ground-truth/manifest.json",
+        help="Where the manifest lives inside the image (docker cp source).",
+    )
+    parser.add_argument("--run-date", required=True, help="Run date (e.g. 2026-06-11).")
+    parser.add_argument("--out", default="raw.jsonl", help="raw.jsonl output path.")
+    parser.add_argument("--depth", type=int, default=None, help="Override walk depth.")
+    args = parser.parse_args(argv)
+
+    config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    depth = args.depth if args.depth is not None else config.get("depth", 6)
+    entry_path = config.get("entry_path", "/")
+    det_role = config.get("determinism_role", "member")
+
+    if args.server_cmd and not args.manifest:
+        parser.error("--server-cmd requires --manifest")
+
+    def make_sandbox():
+        if args.image:
+            return ImageSandbox(args.image)
+        return ServerCmdSandbox(args.server_cmd)
+
+    # Manifest: from disk, or extracted out of a booted container (image mode).
+    if args.manifest:
+        manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    else:
+        sandbox = make_sandbox()
+        sandbox.boot("manifest")
+        try:
+            dest = Path(args.out).parent / "manifest.extracted.json"
+            sandbox.extract_manifest(args.manifest_path_in_image, dest)
+            manifest = json.loads(dest.read_text(encoding="utf-8"))
+        finally:
+            sandbox.stop()
+
+    validate_config(manifest, config)
+
+    from sidira_crawler import __version__ as walker_version
+
+    # Plan: one walk per role, plus a second determinism walk. Fresh sandbox
+    # and fresh browser per walk.
+    plan = [(role, role) for role in config["roles"]]
+    plan.append((f"{det_role}-determinism", det_role))
+
+    walks: dict[str, dict] = {}
+    rewalk: dict | None = None
+    crashes: dict[str, str] = {}
+    timings: dict[str, float] = {}
+    labelled: list[tuple[str, str, dict]] = []
+
+    for label, role in plan:
+        creds = config["roles"][role]
+        started = time.monotonic()
+        try:
+            walk = run_walk(make_sandbox(), label, role, creds, entry_path, depth)
+        except Exception as exc:  # crash gate: report, keep judging the rest
+            crashes[label] = f"{type(exc).__name__}: {exc}"
+            timings[label] = time.monotonic() - started
+            print(f"[sandbox-acceptance] walk {label} CRASHED: {crashes[label]}", file=sys.stderr)
+            continue
+        timings[label] = time.monotonic() - started
+        labelled.append((label, role, walk))
+        if label == f"{det_role}-determinism":
+            rewalk = walk
+        else:
+            walks[role] = walk
+        print(
+            f"[sandbox-acceptance] walk {label}: {len(walk['observations'])} screens, "
+            f"{len(walk['transitions'])} transitions in {timings[label]:.1f}s",
+            file=sys.stderr,
+        )
+
+    meta = {
+        "schema": 1,
+        "image": args.image or None,
+        "server_cmd": args.server_cmd or None,
+        "run_date": args.run_date,
+        "walker_version": walker_version,
+        "depth": depth,
+        "judge_config": str(args.config),
+        "roles": list(config["roles"]),
+        "determinism_role": det_role,
+    }
+    write_raw_jsonl(Path(args.out), meta, labelled)
+
+    verdict = judge(manifest, config, walks, rewalk, crashes)
+    print(render_report(verdict, timings))
+    return 0 if verdict["passed"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
