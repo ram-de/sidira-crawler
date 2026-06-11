@@ -13,7 +13,7 @@ capabilities:
       - guest
       - member
       - dashpass_member
-    max_hops: 3
+    max_hops: 6
 
   - name: checkout
     entry_points:
@@ -22,7 +22,7 @@ capabilities:
       - guest
       - member
       - dashpass_member
-    max_hops: 3
+    max_hops: 6
 
 role_credentials:
   - role: guest
