@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful — Sign in</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <nav>
+    <a class="nav-link" href="/" data-testid="nav-home">Home</a>
+  </nav>
+</header>
+<main>
+  <h1>Sign in to Plateful</h1>
+  <form id="login-form">
+    <label>Email
+      <input type="email" name="email" data-testid="login-email">
+    </label>
+    <label>Password
+      <input type="password" name="password" data-testid="login-password">
+    </label>
+    <button type="submit" data-testid="login-submit">Sign in</button>
+  </form>
+  <div id="login-error"></div>
+</main>
+<script src="/consent.js"></script>
+<script>
+(function () {
+  var form = document.getElementById('login-form');
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var email = form.querySelector('[name="email"]').value;
+    var password = form.querySelector('[name="password"]').value;
+    if (email === 'cook@example.test' && password === 'sourdough') {
+      document.cookie = 'plateful_auth=1; path=/';
+      var next = new URLSearchParams(location.search).get('next') || '/';
+      location.href = '/profiles.html?next=' + encodeURIComponent(next);
+    } else {
+      var err = document.getElementById('login-error');
+      err.innerHTML = '<p class="error" data-testid="login-error">' +
+        'That email and password combination is not on the guest list.</p>';
+    }
+  });
+})();
+</script>
+</body>
+</html>

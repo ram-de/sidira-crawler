@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful — Recipe feed</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <nav>
+    <a class="nav-link" href="/" data-testid="nav-home">Home</a>
+    <a class="nav-link" href="/members.html" data-testid="nav-members">Member kitchen</a>
+    <a class="nav-link" href="/about.html" data-testid="nav-about">About</a>
+  </nav>
+</header>
+<main>
+  <h1>Recipe feed</h1>
+  <div id="cards" data-testid="feed-cards"></div>
+  <div id="sentinel" class="sentinel"></div>
+</main>
+<script src="/consent.js"></script>
+<script>
+(function () {
+  var NAMES = [
+    'Spiced Lentil Stew', 'Charred Corn Salad', 'Miso Butter Noodles', 'Skillet Flatbread',
+    'Roasted Carrot Soup', 'Herb Garden Frittata', 'Smoky Bean Chili', 'Lemon Olive Cake',
+    'Crispy Rice Bowl', 'Braised Leek Gratin', 'Pantry Pasta Bake', 'Stuffed Pepper Boats'
+  ];
+  var BATCH = 4;
+  var loaded = 0;
+  var modal = null;
+  var cards = document.getElementById('cards');
+  var sentinel = document.getElementById('sentinel');
+
+  function openModal(name, id) {
+    if (modal) return;
+    history.pushState({recipe: id}, '', '/feed.html?recipe=' + id);
+    modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('data-testid', 'recipe-modal');
+    modal.innerHTML =
+      '<div class="modal-card"><h2>' + name + '</h2>' +
+      '<p>Step-by-step instructions for ' + name.toLowerCase() +
+      '. Simmer gently and season to taste before serving.</p>' +
+      '<button class="modal-close" data-testid="modal-close">Close</button></div>';
+    modal.querySelector('.modal-close').addEventListener('click', function () {
+      history.back();
+    });
+    document.body.appendChild(modal);
+  }
+  function closeModal() {
+    if (modal) { modal.remove(); modal = null; }
+  }
+  window.addEventListener('popstate', closeModal);
+
+  function finish() {
+    if (document.querySelector('[data-testid="feed-finished"]')) return;
+    var p = document.createElement('p');
+    p.className = 'feed-finished';
+    p.setAttribute('data-testid', 'feed-finished');
+    p.textContent = 'You have cooked through the whole feed.';
+    document.querySelector('main').appendChild(p);
+    observer.disconnect();
+  }
+  function loadMore() {
+    var end = Math.min(loaded + BATCH, NAMES.length);
+    for (var i = loaded; i < end; i++) {
+      (function (name, id) {
+        var card = document.createElement('article');
+        card.className = 'card';
+        card.setAttribute('role', 'button');
+        card.tabIndex = 0;
+        card.setAttribute('data-testid', 'recipe-card');
+        card.innerHTML = '<h2>' + name + '</h2>' +
+          '<p>A weeknight favourite from the Plateful community, ready in under an hour.</p>';
+        card.addEventListener('click', function () { openModal(name, id); });
+        cards.appendChild(card);
+      })(NAMES[i], 'r-' + (i + 1));
+    }
+    loaded = end;
+    if (loaded >= NAMES.length) finish();
+  }
+  var observer = new IntersectionObserver(function (entries) {
+    var hit = entries.some(function (e) { return e.isIntersecting; });
+    if (hit) setTimeout(loadMore, 60);
+  });
+  observer.observe(sentinel);
+  loadMore();
+})();
+</script>
+</body>
+</html>
