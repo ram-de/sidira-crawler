@@ -496,6 +496,7 @@ class _Node:
     url: str
     has_dialog: bool
     has_overlay: bool
+    exhausted: bool
     path: tuple[dict, ...]
     depth: int
 
@@ -732,14 +733,16 @@ def _replay(
 
 
 def _state_matches(page: Page, node: _Node) -> bool:
+    """True iff the live page IS the node's screen: exact URL plus the full
+    screen_id (flags + structural digest). A mutated same-URL DOM is rejected
+    so replay falls back instead of clicking wrong candidate indices."""
     if page.url != node.url:
         return False
-    data = _eval(page, _JS_CAPTURE)
-    if not data:
+    try:
+        state = _capture_state(page, exhausted=node.exhausted)
+    except RuntimeError:
         return False
-    overlay = _eval(page, _JS_OVERLAY, False)
-    has_overlay = bool(overlay and not overlay["is_dialog"])
-    return bool(data["has_dialog"]) == node.has_dialog and has_overlay == node.has_overlay
+    return state.screen_id == node.screen_id
 
 
 def _restore(
@@ -847,6 +850,7 @@ def _walk(
             url=state.url,
             has_dialog=state.has_dialog,
             has_overlay=state.has_blocking_overlay,
+            exhausted=state.exhausted,
             path=path,
             depth=node_depth,
         )
