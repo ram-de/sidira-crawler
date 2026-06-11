@@ -16,9 +16,10 @@ Core semantics
   signature combines boolean flags derived from DOM landmarks (dialog present,
   blocking overlay present, login form present, chooser interstitial,
   feed-exhausted) with a short structural digest (testid shapes, landmark
-  roles, form-control types, bucketed heading count) so same-route structural
-  states — wizard steps, tab panels, drawers — are distinct screens while
-  same-template pages with different content still collapse.
+  roles, form-control types, bucketed heading count, real-button action
+  texts) so same-route structural states — wizard steps, tab panels, drawers,
+  in-place confirm stages — are distinct screens while same-template pages
+  with different content still collapse.
 - Exploration is breadth-first with deterministic, document-order action
   enumeration. Two identical walks produce identical screens and transitions.
 """
@@ -28,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import weakref
 from collections import deque
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -114,6 +116,46 @@ _JS_HELPERS = """
   );
 """
 
+# Set an input's value via the PROTOTYPE's native value setter, not
+# `el.value = v`. Frameworks with controlled inputs (React et al.) install an
+# instance-level value tracker; a direct assignment updates the tracker too,
+# so the framework sees "no change" on the input event and never updates its
+# state — the form then submits empty fields. The prototype setter bypasses
+# the instance tracker, so the dispatched input event registers as a real edit.
+_JS_SETVAL = """
+  const __setVal = (el, v) => {
+    el.focus();
+    const desc = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(el).constructor.prototype, 'value');
+    if (desc && desc.set) desc.set.call(el, v); else el.value = v;
+    el.dispatchEvent(new Event('input', {bubbles: true}));
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+  };
+"""
+
+# Deterministic synthetic values for empty text-like inputs, filled before a
+# button-type candidate is clicked so required-field validation cannot
+# silently block exploration (wizard steps, gated submits). Same values every
+# run — determinism is part of the walker contract. Credentialed login walls
+# never reach this path: the login handler takes precedence in `expand`.
+_JS_FILL = """
+  const __fillValue = (inp) => {
+    if (inp.tagName === 'TEXTAREA') return 'walker';
+    const type = (inp.getAttribute('type') || 'text').toLowerCase();
+    const values = {email: 'walker@example.com', password: 'walker-password-1',
+                    text: 'walker', search: 'walker', tel: '5550100', number: '1'};
+    return type in values ? values[type] : null;
+  };
+  const __fillEmpty = (scope) => {
+    for (const inp of scope.querySelectorAll('input, textarea')) {
+      if (!__vis(inp) || __live(inp)) continue;
+      if (inp.disabled || inp.readOnly || inp.value) continue;
+      const v = __fillValue(inp);
+      if (v !== null) __setVal(inp, v);
+    }
+  };
+"""
+
 _JS_CAPTURE = (
     "() => {"
     + _JS_HELPERS
@@ -148,6 +190,17 @@ _JS_CAPTURE = (
     if (controls.length >= 50) break;
   }
   controls.sort();
+  // Action affordances: visible texts of REAL button elements only. Elements
+  // with role="button" are excluded on purpose — content cards commonly use
+  // that role, and their text varies with content (which must collapse).
+  const actions = new Set();
+  for (const b of document.querySelectorAll(
+      'button, input[type="submit"], input[type="button"]')) {
+    if (!__vis(b) || __live(b)) continue;
+    const t = (b.textContent || b.value || '').replace(/\\s+/g, ' ').trim().slice(0, 40);
+    if (t) actions.add(t);
+    if (actions.size >= 25) break;
+  }
   const copy = [];
   const seen = new Set();
   if (document.body) {
@@ -189,7 +242,7 @@ _JS_CAPTURE = (
   const copyLen = copy.reduce((a, t) => a + t.length, 0);
   return {title: document.title || '', headings: headings,
           data_testids: Array.from(tids).sort(), landmarks: Array.from(landmarks).sort(),
-          form_controls: controls,
+          form_controls: controls, action_texts: Array.from(actions).sort(),
           visible_copy: copy, dom_outline: lines.join('\\n'),
           has_dialog: hasDialog, has_password: hasPassword, copy_len: copyLen};
 }"""
@@ -276,7 +329,7 @@ _JS_ENUM = """
                   testid: el.getAttribute('data-testid') || ''});
       els.push(el);
     }
-    return {cands: cands, els: els};
+    return {cands: cands, els: els, root: root};
   };
 """
 
@@ -284,14 +337,47 @@ _JS_CANDIDATES = (
     "(dialogOnly) => {" + _JS_HELPERS + _JS_ENUM + " return __collect(dialogOnly).cands; }"
 )
 
+# Clicks one candidate. args = {index, dialog, sig, ordinal}. When a
+# signature is given the candidate is RE-RESOLVED in the live DOM at click
+# time — the element whose (tag, text, href, role, classes, testid) identity
+# matches, taking the ordinal-th duplicate in document order. Bare indices
+# into a re-collected list go stale whenever an earlier candidate mutated the
+# page in place (dismissed banner, removed row): the index then silently hits
+# the WRONG element. Ambiguity (signature missing from the live DOM) returns
+# false so the walker restores instead of guessing.
 _JS_CLICK = (
     "(args) => {"
     + _JS_HELPERS
     + _JS_ENUM
+    + _JS_SETVAL
+    + _JS_FILL
     + """
-  const got = __collect(args[1]);
-  const el = got.els[args[0]];
+  const __key = (c) => [c.tag, c.text, c.href, c.role, c.classes, c.testid].join('\\u001f');
+  const resolve = () => {
+    const got = __collect(args.dialog);
+    if (!args.sig) return {el: got.els[args.index] || null, root: got.root};
+    const want = __key(args.sig);
+    let seen = 0;
+    for (let i = 0; i < got.cands.length; i++) {
+      if (__key(got.cands[i]) !== want) continue;
+      if (seen === (args.ordinal || 0)) return {el: got.els[i], root: got.root};
+      seen++;
+    }
+    return {el: null, root: got.root};
+  };
+  let found = resolve();
+  let el = found.el;
   if (!el) return false;
+  // Button-type candidates first fill every empty text-like input in scope
+  // (the button's enclosing form when one exists, else the enumeration root)
+  // so required-field validation cannot silently swallow the click. Filling
+  // can re-render frameworks' DOM, so the candidate is resolved again after.
+  if (el.tagName !== 'A') {
+    __fillEmpty(el.form || el.closest('form') || found.root);
+    const again = resolve();
+    if (again.el) el = again.el;
+    else if (!el.isConnected) return false;
+  }
   el.click();
   return true;
 }"""
@@ -301,6 +387,7 @@ _JS_CLICK = (
 _JS_LOGIN = (
     "(args) => {"
     + _JS_HELPERS
+    + _JS_SETVAL
     + """
   const username = args[0], password = args[1];
   const pw = Array.from(document.querySelectorAll('input[type="password"]')).find(__vis);
@@ -309,22 +396,8 @@ _JS_LOGIN = (
   const userSel = 'input[type="email"], input[autocomplete="username"], ' +
                   'input[type="text"], input:not([type])';
   const uf = Array.from(scope.querySelectorAll(userSel)).find((el) => __vis(el) && el !== pw);
-  // Set via the PROTOTYPE's native value setter, not `el.value = v`. Frameworks
-  // with controlled inputs (React et al.) install an instance-level value
-  // tracker; a direct assignment updates the tracker too, so the framework
-  // sees "no change" on the input event and never updates its state — the
-  // form then submits empty fields. The prototype setter bypasses the
-  // instance tracker, so the dispatched input event registers as a real edit.
-  const setVal = (el, v) => {
-    el.focus();
-    const desc = Object.getOwnPropertyDescriptor(
-      Object.getPrototypeOf(el).constructor.prototype, 'value');
-    if (desc && desc.set) desc.set.call(el, v); else el.value = v;
-    el.dispatchEvent(new Event('input', {bubbles: true}));
-    el.dispatchEvent(new Event('change', {bubbles: true}));
-  };
-  if (uf) setVal(uf, username);
-  setVal(pw, password);
+  if (uf) __setVal(uf, username);
+  __setVal(pw, password);
   let btn = null;
   for (const b of scope.querySelectorAll('button[type="submit"], input[type="submit"], button')) {
     if (!__vis(b)) continue;
@@ -434,27 +507,37 @@ def _structural_digest(
     landmarks: list[str],
     form_controls: list[str],
     heading_count: int,
+    action_texts: list[str],
 ) -> str:
-    """Short deterministic digest of page STRUCTURE — never text content.
+    """Short deterministic digest of page STRUCTURE — never content text.
 
     Built so that the same template with different content collapses
     (``/items/:id`` pages, repeated feed cards) but same-route structural
-    states (wizard steps, tab panels, drawers) split:
+    states (wizard steps, tab panels, drawers, in-place confirm stages)
+    split:
 
     - sorted *set* of data-testid values with digit runs stripped (repeated
       cards and numbered ids collapse),
     - sorted set of ARIA landmark roles,
     - sorted multiset of visible form-control types,
     - bucketed heading count (growth of repeated cards usually stays in
-      bucket; a crossing is bounded noise, which beats missed states).
+      bucket; a crossing is bounded noise, which beats missed states),
+    - sorted *set* of real-button action texts, digit runs stripped. Button
+      labels are the page's action affordances — an in-place stage swap that
+      replaces "Upgrade" with "Confirm"/"Cancel" is a different screen even
+      when no testid, landmark, control, or heading changes. role="button"
+      content cards are excluded (see _JS_CAPTURE) so feed growth still
+      collapses.
     """
     testid_shapes = sorted({_DIGIT_RUN_RE.sub("", t) for t in data_testids})
+    action_shapes = sorted({_DIGIT_RUN_RE.sub("", t) for t in action_texts})
     payload = "\x1f".join(
         [
             "|".join(testid_shapes),
             "|".join(sorted(set(landmarks))),
             "|".join(sorted(form_controls)),
             _heading_bucket(heading_count),
+            "|".join(action_shapes),
         ]
     )
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:6]
@@ -473,6 +556,7 @@ class _PageState:
     data_testids: list[str]
     landmarks: list[str]
     form_controls: list[str]
+    action_texts: list[str]
     has_dialog: bool
     has_blocking_overlay: bool
     has_password: bool
@@ -498,7 +582,11 @@ class _PageState:
         tokens.append(
             "s"
             + _structural_digest(
-                self.data_testids, self.landmarks, self.form_controls, len(self.headings)
+                self.data_testids,
+                self.landmarks,
+                self.form_controls,
+                len(self.headings),
+                self.action_texts,
             )
         )
         return f"{self.route}::{'+'.join(tokens)}"
@@ -550,8 +638,50 @@ def _eval(page: Page, expression: str, arg: object = None, attempts: int = 3) ->
     return None
 
 
+#: In-flight request tracking per page (see _track_network). Weak keys so
+#: closed pages don't accumulate.
+_PENDING_REQUESTS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+#: Hard cap on _settle's stability loop (rounds of ~80ms). Generous enough to
+#: outlast realistic in-app fetch chains, small enough to terminate on
+#: pathological never-ending connections (long-poll, SSE).
+_SETTLE_MAX_ROUNDS = 60
+
+
+def _track_network(page: Page) -> set:
+    """Track the page's in-flight requests (idempotent per page).
+
+    ``wait_for_load_state("networkidle")`` is useless after same-document SPA
+    actions — the state was already reached once, so the call returns
+    immediately even while a click handler's fetch is still pending. The
+    walker instead counts requests itself and lets _settle wait for true
+    quiescence, otherwise an async click handler (fetch then client-side
+    navigate) looks like a no-op at capture time and its deferred effect gets
+    misattributed to the NEXT candidate's transition.
+    """
+    pending = _PENDING_REQUESTS.get(page)
+    if pending is None:
+        pending = set()
+        _PENDING_REQUESTS[page] = pending
+
+        # Plain functions, not pending.add/.discard: Playwright wraps event
+        # handlers and cannot setattr on builtin bound methods.
+        def _began(request: object) -> None:
+            pending.add(request)
+
+        def _ended(request: object) -> None:
+            pending.discard(request)
+
+        page.on("request", _began)
+        page.on("requestfinished", _ended)
+        page.on("requestfailed", _ended)
+    return pending
+
+
 def _settle(page: Page) -> None:
-    """Wait for client render: network-idle plus a DOM-stability heuristic."""
+    """Wait for client render: load states, tracked network quiescence, and a
+    DOM-stability heuristic. Bounded — never waits forever."""
+    pending = _track_network(page)
     try:
         page.wait_for_load_state("load", timeout=5000)
     except Error:
@@ -562,9 +692,9 @@ def _settle(page: Page) -> None:
         pass
     last = -1
     stable = 0
-    for _ in range(25):
+    for _ in range(_SETTLE_MAX_ROUNDS):
         size = _eval(page, "() => document.body ? document.body.innerHTML.length : -1", attempts=1)
-        if size is not None and size == last and size >= 0:
+        if not pending and size is not None and size == last and size >= 0:
             stable += 1
             if stable >= 2:
                 return
@@ -575,6 +705,7 @@ def _settle(page: Page) -> None:
 
 
 def _goto(page: Page, url: str) -> None:
+    _track_network(page)
     page.goto(url, wait_until="load", timeout=15000)
     _settle(page)
 
@@ -665,6 +796,7 @@ def _capture_state(page: Page, exhausted: bool = False) -> _PageState:
         data_testids=data["data_testids"],
         landmarks=data["landmarks"],
         form_controls=data["form_controls"],
+        action_texts=data["action_texts"],
         has_dialog=bool(data["has_dialog"]),
         has_blocking_overlay=has_overlay,
         has_password=bool(data["has_password"]),
@@ -724,14 +856,23 @@ def _execute_action(page: Page, action: dict, username: str | None, password: st
         data = _eval(page, _JS_CAPTURE)
         cands = _eval(page, _JS_CANDIDATES, False) or []
         idxs = _chooser_group(cands, data["copy_len"]) if data else None
-        _eval(page, _JS_CLICK, [idxs[0] if idxs else 0, False])
+        _eval(page, _JS_CLICK, {"index": idxs[0] if idxs else 0, "dialog": False})
     elif kind == "scroll":
         _scroll_page(page)
     elif kind == "click":
         # Clicks are recorded against the post-scroll candidate list, so the
         # lazy content must be loaded before re-enumerating.
         _scroll_page(page)
-        _eval(page, _JS_CLICK, [action["index"], action.get("dialog", False)])
+        _eval(
+            page,
+            _JS_CLICK,
+            {
+                "index": action["index"],
+                "dialog": action.get("dialog", False),
+                "sig": action.get("sig"),
+                "ordinal": action.get("ordinal", 0),
+            },
+        )
     _settle(page)
 
 
@@ -907,7 +1048,7 @@ def _walk(
             first = idxs[0]
             cand = state.candidates[first]
             label = cand["text"] or cand["testid"] or cand["tag"]
-            _eval(page, _JS_CLICK, [first, False])
+            _eval(page, _JS_CLICK, {"index": first, "dialog": False})
             _settle(page)
             new_state = _capture_state(page)
             trigger = f"select first option '{label}'"
@@ -922,8 +1063,18 @@ def _walk(
             handle_result(node, {"kind": "scroll"}, "scroll feed", new_state)
             return
 
-        # 5) Generic enumeration: candidate actions in document order.
+        # 5) Generic enumeration: candidate actions in document order. Each
+        # click is re-resolved at click time by the candidate's signature
+        # (with its duplicate ordinal) so in-place DOM mutations from earlier
+        # candidates can never shift a bare index onto the wrong element.
         candidates = _eval(page, _JS_CANDIDATES, state.has_dialog) or []
+        ordinal_at: list[int] = []
+        sig_counts: dict[tuple, int] = {}
+        for cand in candidates:
+            sig = (cand["tag"], cand["text"], cand["href"], cand["role"],
+                   cand["classes"], cand["testid"])
+            ordinal_at.append(sig_counts.get(sig, 0))
+            sig_counts[sig] = ordinal_at[-1] + 1
         in_place = True  # page is currently at the node's state
         for index, cand in _sample_candidates(candidates):
             if not in_place and not _restore(page, entry_url, node, username, password):
@@ -931,8 +1082,13 @@ def _walk(
                 return
             in_place = True
             _eval(page, "() => { window.__sidira_mark = 1; }")
-            clicked = _eval(page, _JS_CLICK, [index, state.has_dialog])
+            click_args = {"index": index, "dialog": state.has_dialog,
+                          "sig": cand, "ordinal": ordinal_at[index]}
+            clicked = _eval(page, _JS_CLICK, click_args)
             if not clicked:
+                # The candidate's signature is gone from the live DOM — an
+                # earlier action mutated the page. Resync before continuing.
+                in_place = False
                 continue
             _settle(page)
             mark_alive = bool(_eval(page, "() => window.__sidira_mark === 1", attempts=1))
@@ -944,7 +1100,8 @@ def _walk(
                 continue
             kind = "link" if cand["tag"] == "a" else "button"
             label = cand["text"] or cand["testid"] or cand["href"] or cand["tag"]
-            action = {"kind": "click", "index": index, "dialog": state.has_dialog}
+            action = {"kind": "click", "index": index, "dialog": state.has_dialog,
+                      "sig": cand, "ordinal": ordinal_at[index]}
             handle_result(node, action, f"click {kind} '{label}'", new_state)
             in_place = False
 

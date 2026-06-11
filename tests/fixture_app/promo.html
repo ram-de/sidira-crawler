@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful — Pantry offers</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <nav>
+    <a class="nav-link" href="/" data-testid="nav-home">Home</a>
+  </nav>
+</header>
+<main>
+  <h1>Pantry offers</h1>
+  <!-- Hostile trait: stale candidate indices. The promo strip's dismiss is a
+       preventDefault'd LINK that removes the strip IN PLACE without changing
+       anything the structural digest sees (no testid, landmark, form control,
+       heading, or real-button change). A walker that re-collects candidates
+       and clicks by bare index after that "no-op" hits the WRONG element:
+       every later index has shifted up by one. Clicks must re-resolve the
+       candidate by its signature at click time. -->
+  <div id="promo-strip" class="promo-strip">
+    <span>Fresh spring menus are in the pantry this week.</span>
+    <a href="/offer.html" class="promo-hide">Hide offers</a>
+  </div>
+  <p>Member pricing applies at checkout. Upgrading unlocks the seasonal menu
+     collections, and you can step back to the free plan whenever you like.</p>
+  <p>Plans renew monthly. The community pantry stays free for everyone, and
+     upgraded kitchens get early access to twice-tested holiday menus, batch
+     plans for busy weeks, and printable shopping lists for every recipe.</p>
+  <button class="promo-upgrade" data-testid="promo-upgrade">Upgrade plan</button>
+  <button class="promo-signout" data-testid="promo-signout">Sign out</button>
+  <div id="upgrade-panel"></div>
+</main>
+<script src="/consent.js"></script>
+<script>
+(function () {
+  document.querySelector('.promo-hide').addEventListener('click', function (e) {
+    e.preventDefault();
+    var strip = document.getElementById('promo-strip');
+    if (strip) strip.remove();
+  });
+  document.querySelector('[data-testid="promo-upgrade"]').addEventListener('click', function () {
+    var panel = document.getElementById('upgrade-panel');
+    if (panel.firstChild) return;
+    var box = document.createElement('div');
+    box.setAttribute('data-testid', 'upgrade-confirm');
+    box.innerHTML = '<p>Confirm your kitchen upgrade to keep the seasonal menus.</p>';
+    panel.appendChild(box);
+  });
+  document.querySelector('[data-testid="promo-signout"]').addEventListener('click', function () {
+    location.href = '/';
+  });
+})();
+</script>
+</body>
+</html>

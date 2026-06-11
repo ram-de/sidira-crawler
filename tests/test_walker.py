@@ -173,6 +173,25 @@ def test_wizard_steps_on_same_route_are_distinct_screens(full_walk: RawWalk) -> 
     assert hops, "the step-1 -> step-2 transition must be recorded as one hop"
 
 
+def test_required_inputs_filled_before_submit(full_walk: RawWalk) -> None:
+    """Wizard step 1 REJECTS empty submits (required dish text + email). The
+    walker must deterministically fill empty text-like inputs before clicking
+    button candidates, or advancement is silently blocked and step 2 is
+    unreachable for the whole walk."""
+    screens = _screens(full_walk)
+    step2 = [s for s, o in screens.items() if "wizard-servings" in o.data_testids]
+    assert step2, (
+        "step 2 is gated behind required step-1 inputs — the walker must fill "
+        "them before clicking Next"
+    )
+    hops = [
+        t
+        for t in full_walk.transitions
+        if t.to_screen_id in step2 and t.trigger == "click button 'Next'"
+    ]
+    assert hops, "advancing the gated wizard must be recorded as the Next click"
+
+
 # ---------------------------------------------------------------------------
 # Modal with URL
 # ---------------------------------------------------------------------------
@@ -193,6 +212,46 @@ def test_modal_with_url_is_a_new_screen_one_hop(full_walk: RawWalk) -> None:
     hops_in = [t for t in full_walk.transitions if t.to_screen_id == modal.screen_id]
     assert hops_in, "opening the modal must be exactly one recorded hop"
     assert all(t.from_screen_id != modal.screen_id for t in hops_in)
+
+
+# ---------------------------------------------------------------------------
+# Click integrity: stale indices and deferred async effects
+# ---------------------------------------------------------------------------
+
+
+def test_stale_candidate_index_resolved_by_signature(full_walk: RawWalk) -> None:
+    """promo.html's dismissible strip is removed IN PLACE by a preventDefault'd
+    link without changing anything the structural digest sees. Every later
+    candidate index then points one element off: a bare-index click on
+    'Upgrade plan' actually hits 'Sign out' and the recorded transition lands
+    on home instead of the in-place confirm panel. The recorded transition's
+    trigger must match what its destination implies."""
+    screens = _screens(full_walk)
+    upgrades = [
+        t for t in full_walk.transitions if t.trigger == "click button 'Upgrade plan'"
+    ]
+    assert upgrades, "the upgrade candidate must produce a recorded transition"
+    for hop in upgrades:
+        dest = screens.get(hop.to_screen_id)
+        assert dest is not None and "upgrade-confirm" in dest.data_testids, (
+            f"'Upgrade plan' must land on the confirm panel, not {hop.to_screen_id} — "
+            "a stale candidate index hit the wrong element"
+        )
+
+
+def test_deferred_async_click_effect_attributed(full_walk: RawWalk) -> None:
+    """sync.html's button mutates the DOM only after a SLOW fetch resolves. A
+    settle that ignores in-flight requests classifies the click as a no-op:
+    the effect goes unrecorded (or leaks into the next candidate's
+    transition). The walker must wait for network quiescence and attribute
+    the resulting screen to the click that caused it."""
+    synced = [o for o in full_walk.observations if "sync-done" in o.data_testids]
+    assert synced, "the deferred effect of the sync click must be observed as a screen"
+    hops = [t for t in full_walk.transitions if t.to_screen_id == synced[0].screen_id]
+    assert hops, "reaching the synced state must be a recorded transition"
+    assert all(t.trigger == "click button 'Sync pantry'" for t in hops), (
+        "the synced state must be attributed to the sync click, not a later candidate"
+    )
 
 
 # ---------------------------------------------------------------------------
