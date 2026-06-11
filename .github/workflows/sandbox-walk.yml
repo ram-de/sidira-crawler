@@ -1,0 +1,93 @@
+name: sandbox-walk
+
+# Acceptance gate: walk the pinned Streamly sandbox image with the generic
+# walker engine and judge coverage against the sandbox's ground-truth
+# manifest (two-part gate — see docs/sandbox-acceptance.md).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  sandbox-walk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SANDBOX_IMAGE: ghcr.io/ram-de/streamly-sandbox@sha256:abdeb699118e99271363c0ea705a8142cbd1e55debb80211e7e0830892b9aaff
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package + browser
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          playwright install --with-deps chromium
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Run sandbox acceptance
+        run: |
+          python scripts/sandbox_acceptance.py \
+            --image "$SANDBOX_IMAGE" \
+            --config acceptance/streamly-sandbox.json \
+            --run-date "$(date -u +%F)" \
+            --out raw.jsonl
+
+      - name: Upload raw walk output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-jsonl
+          path: raw.jsonl
+          if-no-files-found: warn
+
+      # R2 upload is optional: it runs only when the R2 secrets are configured
+      # on the repo. Secrets cannot be referenced in `if:` directly, so the
+      # guard goes through an env var.
+      - name: Check R2 secrets
+        if: always()
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          if [ -n "$R2_BUCKET" ]; then
+            echo "have_r2=true" >> "$GITHUB_ENV"
+          else
+            echo "have_r2=false" >> "$GITHUB_ENV"
+            echo "::notice title=R2 upload skipped::R2 secrets are not configured on this repo — raw.jsonl was NOT uploaded to R2 (the artifact above still has it). Configure R2_BUCKET, R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY to enable."
+          fi
+
+      - name: Upload raw.jsonl to R2
+        if: always() && env.have_r2 == 'true'
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          python - <<'EOF'
+          import datetime
+          import os
+          import boto3
+
+          date = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
+          key = f"customers/streamly-sandbox/crawl/{date}/raw.jsonl"
+          client = boto3.client(
+              "s3",
+              endpoint_url=os.environ["R2_ENDPOINT_URL"],
+              aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+              aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+          )
+          client.upload_file("raw.jsonl", os.environ["R2_BUCKET"], key)
+          print(f"uploaded raw.jsonl -> s3://{os.environ['R2_BUCKET']}/{key}")
+          EOF
