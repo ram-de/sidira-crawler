@@ -44,15 +44,25 @@ walker failure, never budget exhaustion.
 ## Screen identity
 
 A screen is **normalized route + UI-state signature**, formatted
-`route::token+token`.
+`route::token+token+s1a2b3c`.
 
 - **Route normalization**: path segments that look like identifiers (pure
-  digits, UUIDs, long hex) collapse to `:id`; query string and fragment are
-  dropped. `/title/t-101` and `/title/t-205` are the same screen.
-- **State signature**: deterministic tokens derived from DOM landmarks, in
-  fixed order: `overlay` (blocking consent layer present), `dialog` (open
+  digits, UUIDs, long hex) collapse to `:id`; query string and plain
+  fragments are dropped. `/title/t-101` and `/title/t-205` are the same
+  screen.
+- **State signature**: deterministic flag tokens derived from DOM landmarks,
+  in fixed order: `overlay` (blocking consent layer present), `dialog` (open
   modal), `login` (visible password field), `chooser` (dominant
-  pick-one-option group), `exhausted` (feed scrolled to its end state).
+  pick-one-option group), `exhausted` (feed scrolled to its end state) —
+  followed by a **structural digest** token (`s` + first 6 hex of sha1) so
+  same-route structural states with none of those flags (wizard steps, tab
+  panels, drawers) are still distinct screens. The digest hashes structure,
+  never text content: the sorted set of `data-testid` values with digit runs
+  stripped, the sorted set of ARIA landmark roles, the sorted multiset of
+  visible form-control types, and a bucketed heading count (0 / 1 / 2 / 3-5 /
+  6+). Same template + different content (entity pages, repeated feed cards)
+  collapses; lazy-load growth of repeated cards usually stays in bucket, and
+  a bucket crossing is bounded noise rather than a missed state.
 
 Two walks of the same build produce identical screen ids; the BFS enumerates
 candidates in document order, so transition sets are deterministic too.

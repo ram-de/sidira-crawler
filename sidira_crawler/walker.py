@@ -13,14 +13,19 @@ Core semantics
   wizard steps, and auth round-trips each count as ONE hop.
 - A screen is (normalized route pattern + UI state signature). Likely-ID path
   segments are collapsed (``/title/t-101`` == ``/title/t-205``). The state
-  signature is derived from DOM landmarks: dialog present, blocking overlay
-  present, login form present, chooser interstitial, feed-exhausted.
+  signature combines boolean flags derived from DOM landmarks (dialog present,
+  blocking overlay present, login form present, chooser interstitial,
+  feed-exhausted) with a short structural digest (testid shapes, landmark
+  roles, form-control types, bucketed heading count) so same-route structural
+  states — wizard steps, tab panels, drawers — are distinct screens while
+  same-template pages with different content still collapse.
 - Exploration is breadth-first with deterministic, document-order action
   enumeration. Two identical walks produce identical screens and transitions.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from collections import deque
@@ -134,6 +139,15 @@ _JS_CAPTURE = (
     const role = el.getAttribute('role') || tagRoles[el.tagName];
     if (role) landmarks.add(role);
   }
+  const controls = [];
+  for (const el of document.querySelectorAll('input, select, textarea')) {
+    if (!__vis(el) || __live(el)) continue;
+    if (el.tagName === 'SELECT') controls.push('select');
+    else if (el.tagName === 'TEXTAREA') controls.push('textarea');
+    else controls.push('input:' + (el.getAttribute('type') || 'text').toLowerCase());
+    if (controls.length >= 50) break;
+  }
+  controls.sort();
   const copy = [];
   const seen = new Set();
   if (document.body) {
@@ -175,6 +189,7 @@ _JS_CAPTURE = (
   const copyLen = copy.reduce((a, t) => a + t.length, 0);
   return {title: document.title || '', headings: headings,
           data_testids: Array.from(tids).sort(), landmarks: Array.from(landmarks).sort(),
+          form_controls: controls,
           visible_copy: copy, dom_outline: lines.join('\\n'),
           has_dialog: hasDialog, has_password: hasPassword, copy_len: copyLen};
 }"""
@@ -384,6 +399,51 @@ def _normalize_route(url: str) -> str:
     return "/" + "/".join(normalized)
 
 
+_DIGIT_RUN_RE = re.compile(r"\d+")
+
+
+def _heading_bucket(count: int) -> str:
+    """Bucket the heading count so lazy-load growth of repeated content does
+    not (usually) fork screen identity, while 1-heading vs many-heading
+    layouts still differ."""
+    if count <= 2:
+        return f"h{count}"
+    if count <= 5:
+        return "h3-5"
+    return "h6+"
+
+
+def _structural_digest(
+    data_testids: list[str],
+    landmarks: list[str],
+    form_controls: list[str],
+    heading_count: int,
+) -> str:
+    """Short deterministic digest of page STRUCTURE — never text content.
+
+    Built so that the same template with different content collapses
+    (``/items/:id`` pages, repeated feed cards) but same-route structural
+    states (wizard steps, tab panels, drawers) split:
+
+    - sorted *set* of data-testid values with digit runs stripped (repeated
+      cards and numbered ids collapse),
+    - sorted set of ARIA landmark roles,
+    - sorted multiset of visible form-control types,
+    - bucketed heading count (growth of repeated cards usually stays in
+      bucket; a crossing is bounded noise, which beats missed states).
+    """
+    testid_shapes = sorted({_DIGIT_RUN_RE.sub("", t) for t in data_testids})
+    payload = "\x1f".join(
+        [
+            "|".join(testid_shapes),
+            "|".join(sorted(set(landmarks))),
+            "|".join(sorted(form_controls)),
+            _heading_bucket(heading_count),
+        ]
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:6]
+
+
 @dataclass
 class _PageState:
     """Internal snapshot of the live page, used for identity + classification."""
@@ -396,6 +456,7 @@ class _PageState:
     visible_copy: list[str]
     data_testids: list[str]
     landmarks: list[str]
+    form_controls: list[str]
     has_dialog: bool
     has_blocking_overlay: bool
     has_password: bool
@@ -418,7 +479,13 @@ class _PageState:
             tokens.append("chooser")
         if self.exhausted:
             tokens.append("exhausted")
-        return self.route + (f"::{'+'.join(tokens)}" if tokens else "")
+        tokens.append(
+            "s"
+            + _structural_digest(
+                self.data_testids, self.landmarks, self.form_controls, len(self.headings)
+            )
+        )
+        return f"{self.route}::{'+'.join(tokens)}"
 
 
 @dataclass(frozen=True)
@@ -580,6 +647,7 @@ def _capture_state(page: Page, exhausted: bool = False) -> _PageState:
         visible_copy=data["visible_copy"],
         data_testids=data["data_testids"],
         landmarks=data["landmarks"],
+        form_controls=data["form_controls"],
         has_dialog=bool(data["has_dialog"]),
         has_blocking_overlay=has_overlay,
         has_password=bool(data["has_password"]),

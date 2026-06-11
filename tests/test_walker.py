@@ -150,6 +150,30 @@ def test_interstitial_chooser(full_walk: RawWalk) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Same-route wizard
+# ---------------------------------------------------------------------------
+
+
+def test_wizard_steps_on_same_route_are_distinct_screens(full_walk: RawWalk) -> None:
+    """A wizard swaps its fields in place: same URL, no flag changes. Each
+    step must still be its own screen and the step transition a recorded hop."""
+    screens = _screens(full_walk)
+    plan_ids = [s for s, o in screens.items() if o.route == "/plan.html"]
+    assert len(plan_ids) >= 2, "wizard step 2 must be distinct from step 1"
+
+    step1 = [s for s in plan_ids if "wizard-dish" in screens[s].data_testids]
+    step2 = [s for s in plan_ids if "wizard-servings" in screens[s].data_testids]
+    assert step1 and step2, "both wizard steps must be observed"
+
+    hops = [
+        t
+        for t in full_walk.transitions
+        if t.from_screen_id in step1 and t.to_screen_id in step2
+    ]
+    assert hops, "the step-1 -> step-2 transition must be recorded as one hop"
+
+
+# ---------------------------------------------------------------------------
 # Modal with URL
 # ---------------------------------------------------------------------------
 
@@ -177,7 +201,7 @@ def test_modal_with_url_is_a_new_screen_one_hop(full_walk: RawWalk) -> None:
 
 
 def test_feed_exhausted_state_discovered(full_walk: RawWalk) -> None:
-    exhausted = [o for o in full_walk.observations if o.screen_id.endswith("exhausted")]
+    exhausted = [o for o in full_walk.observations if "exhausted" in o.screen_id]
     assert exhausted, "the feed-exhausted state must be observed as its own screen"
     assert "feed-finished" in exhausted[0].data_testids, (
         "the terminal marker must be visible in the exhausted observation"
