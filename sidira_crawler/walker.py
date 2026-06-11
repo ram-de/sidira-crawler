@@ -259,11 +259,15 @@ _JS_ENUM = """
       if (el.tagName === 'A') {
         if (el.getAttribute('target') === '_blank' || el.hasAttribute('download')) continue;
         const raw = el.getAttribute('href') || '';
-        if (/^(javascript:|mailto:|tel:)/i.test(raw) || raw.startsWith('#')) continue;
+        if (/^(javascript:|mailto:|tel:)/i.test(raw)) continue;
         let u;
         try { u = new URL(el.href, location.href); } catch (e) { continue; }
         if (u.origin !== location.origin) continue;
-        href = u.pathname + u.search;
+        // Hash ROUTES (#/... or #!/...) are real SPA navigation; plain
+        // in-page #anchors are not candidates at all.
+        const hashRoute = /^#!?\\//.test(u.hash);
+        if (raw.startsWith('#') && !hashRoute) continue;
+        href = u.pathname + u.search + (hashRoute ? u.hash : '');
       }
       const text = (el.textContent || el.value || '').replace(/\\s+/g, ' ').trim().slice(0, 60);
       cands.push({tag: el.tagName.toLowerCase(), text: text, href: href,
@@ -387,16 +391,28 @@ def _looks_like_id(segment: str) -> bool:
     return any(ch.isdigit() for ch in segment)
 
 
+def _normalize_path(path: str) -> str:
+    segments = [s for s in path.split("/") if s]
+    return "/".join(":id" if _looks_like_id(s) else s for s in segments)
+
+
 def _normalize_route(url: str) -> str:
     """Collapse likely-ID path segments so ``/title/t-101`` == ``/title/t-205``.
 
-    Query strings and fragments are dropped — UI-state differences they encode
-    are captured by the state signature (dialog/overlay/... flags) instead.
+    Query strings and plain fragments are dropped — UI-state differences they
+    encode are captured by the state signature instead. Hash ROUTES
+    (``#/...`` or ``#!/...``) are real navigation in hash-router SPAs, so
+    such fragment paths are folded into the route with the same ``:id``
+    segment normalization.
     """
     parts = urlsplit(url)
-    segments = [s for s in parts.path.split("/") if s]
-    normalized = [":id" if _looks_like_id(s) else s for s in segments]
-    return "/" + "/".join(normalized)
+    route = "/" + _normalize_path(parts.path)
+    fragment = parts.fragment
+    bang = fragment.startswith("!")
+    frag_path = (fragment[1:] if bang else fragment).split("?")[0]
+    if frag_path.startswith("/"):
+        route += ("#!/" if bang else "#/") + _normalize_path(frag_path)
+    return route
 
 
 _DIGIT_RUN_RE = re.compile(r"\d+")

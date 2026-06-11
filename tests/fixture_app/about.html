@@ -14,14 +14,43 @@
   </nav>
 </header>
 <main>
-  <h1>About Plateful</h1>
-  <p>Plateful started as a spreadsheet of weeknight dinners shared between three
-    housemates. It grew into a small community of home cooks who test, photograph,
-    and argue about each other's recipes until they are reliable enough to share.</p>
-  <p>We do not sell your data, we do not rank recipes by engagement, and we will
-    never put a pop-up between you and the garlic-to-butter ratio. Except the cookie
-    banner. Sorry about the cookie banner.</p>
+  <!-- Hash-router view: #/specials is a real client-side ROUTE rendering a
+       distinct view, while #about-anchor is a plain in-page anchor. Pins
+       that the walker navigates the former and ignores the latter. -->
+  <div id="view"></div>
 </main>
 <script src="/consent.js"></script>
+<script>
+(function () {
+  var view = document.getElementById('view');
+  function render() {
+    if (location.hash === '#/specials') {
+      view.innerHTML =
+        '<h1>Weekly specials</h1>' +
+        '<ul data-testid="specials-list">' +
+        '<li>Charred corn, three ways</li>' +
+        '<li>Stone-fruit salads for hot evenings</li>' +
+        '<li>One-pot grains for the lazy Sunday</li>' +
+        '</ul>';
+      return;
+    }
+    view.innerHTML =
+      '<h1>About Plateful</h1>' +
+      '<p>Plateful started as a spreadsheet of weeknight dinners shared between three ' +
+      'housemates. It grew into a small community of home cooks who test, photograph, ' +
+      'and argue about each other\'s recipes until they are reliable enough to share.</p>' +
+      '<p><a href="#/specials" data-testid="link-specials">This week\'s specials</a> ' +
+      '<a href="#about-anchor" data-testid="link-about-anchor">Jump to the fine print</a></p>' +
+      '<p>We do not sell your data, we do not rank recipes by engagement, and we will ' +
+      'never put a pop-up between you and the garlic-to-butter ratio. Except the cookie ' +
+      'banner. Sorry about the cookie banner.</p>' +
+      '<section id="about-anchor"><h2>The fine print</h2>' +
+      '<p>Recipes are shared under a community license; the butter is non-negotiable.</p>' +
+      '</section>';
+  }
+  window.addEventListener('hashchange', render);
+  render();
+})();
+</script>
 </body>
 </html>

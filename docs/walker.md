@@ -49,7 +49,10 @@ A screen is **normalized route + UI-state signature**, formatted
 - **Route normalization**: path segments that look like identifiers (pure
   digits, UUIDs, long hex) collapse to `:id`; query string and plain
   fragments are dropped. `/title/t-101` and `/title/t-205` are the same
-  screen.
+  screen. Hash **routes** (`#/...`, `#!/...`) are real navigation in
+  hash-router SPAs: their fragment path is folded into the route with the
+  same `:id` normalization (`/app#/settings`), while plain `#anchor`
+  fragments are never navigation candidates.
 - **State signature**: deterministic flag tokens derived from DOM landmarks,
   in fixed order: `overlay` (blocking consent layer present), `dialog` (open
   modal), `login` (visible password field), `chooser` (dominant

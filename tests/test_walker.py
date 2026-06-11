@@ -229,6 +229,29 @@ def test_feed_scroll_terminates_by_structure(fixture_server, browser) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Hash routes vs in-page anchors
+# ---------------------------------------------------------------------------
+
+
+def test_hash_route_is_navigation_but_plain_anchor_is_not(full_walk: RawWalk) -> None:
+    routes = _routes(full_walk)
+    assert "/about.html#/specials" in routes, (
+        "hash ROUTES (#/...) are real SPA navigation and must be discovered "
+        "as their own route"
+    )
+    specials = [o for o in full_walk.observations if o.route == "/about.html#/specials"]
+    assert "specials-list" in specials[0].data_testids
+
+    hops = [t for t in full_walk.transitions if t.to_screen_id == specials[0].screen_id]
+    assert hops, "entering the hash route must be a recorded transition"
+
+    assert all("about-anchor" not in o.url for o in full_walk.observations), (
+        "plain in-page #anchors must not be followed or become screens"
+    )
+    assert all("about-anchor" not in r for r in routes)
+
+
+# ---------------------------------------------------------------------------
 # Depth, determinism, toasts
 # ---------------------------------------------------------------------------
 
