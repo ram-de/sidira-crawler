@@ -144,15 +144,37 @@ def synthesize_clusters(graph: ScreenGraph, llm: LLMClient, retries: int = 2) ->
         result, errors = _parse_and_validate(raw, graph)
         if not errors:
             assert result is not None
-            return result
+            return _drop_double_listed(result)
     if result is not None and all(e.startswith(_MISSING_COVERAGE_PREFIX) for e in errors):
         assigned = {sid for cap in result.capabilities for sid in cap.screen_ids}
         missing = sorted(set(graph.screens) - assigned - set(result.unassigned_screen_ids))
         log.warning("cluster.coverage_repaired", missing=missing)
-        return result.model_copy(
+        repaired = result.model_copy(
             update={"unassigned_screen_ids": sorted({*result.unassigned_screen_ids, *missing})}
         )
+        return _drop_double_listed(repaired)
     raise ValueError("LLM clustering failed validation after retries: " + "; ".join(errors))
+
+
+def _drop_double_listed(result: ClusterResult) -> ClusterResult:
+    """A screen listed both in a capability and in unassigned is assigned.
+
+    The LLM occasionally double-lists a screen; assignment wins, so the
+    manifest's ``unassigned_screens`` count reflects actual coverage instead
+    of contradicting the capability figma files.
+    """
+    assigned = {sid for cap in result.capabilities for sid in cap.screen_ids}
+    double = sorted(set(result.unassigned_screen_ids) & assigned)
+    if not double:
+        return result
+    log.warning("cluster.double_listed_repaired", screen_ids=double)
+    return result.model_copy(
+        update={
+            "unassigned_screen_ids": [
+                s for s in result.unassigned_screen_ids if s not in assigned
+            ]
+        }
+    )
 
 
 def _parse_and_validate(

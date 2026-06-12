@@ -217,6 +217,18 @@ def test_cluster_repairs_coverage_only_failures(raw_path):
     assert [c.name for c in result.capabilities] == ["brew_logging", "authentication"]
 
 
+def test_cluster_drops_double_listed_screens(raw_path):
+    # The LLM listed LOGIN both inside a capability and in unassigned:
+    # assignment wins, so unassigned_screens metadata matches actual coverage.
+    graph = load_raw_jsonl(raw_path)
+    double = json.loads(json.dumps(CLUSTER_JSON))
+    double["unassigned_screen_ids"] = [HELP, LOGIN]
+    llm = FakeLLM([json.dumps(double)])
+    result = synthesize_clusters(graph, llm, retries=0)
+    assert result.unassigned_screen_ids == [HELP]
+    assert [c.name for c in result.capabilities] == ["brew_logging", "authentication"]
+
+
 def test_cluster_does_not_repair_mixed_failures(raw_path):
     # Coverage repair only applies when missing screens are the ONLY defect.
     graph = load_raw_jsonl(raw_path)
