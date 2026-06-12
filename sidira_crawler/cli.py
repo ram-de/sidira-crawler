@@ -100,7 +100,12 @@ def walk(
 def synthesize(raw_path: str, customer: str, snapshot: str | None, out_dir: str | None) -> None:
     """Synthesize a Feature Pack from a raw walk (Phase-3 capability synthesis)."""
     from sidira_crawler.llm import get_client
-    from sidira_crawler.storage import LocalArtifactStore, get_store, write_diff
+    from sidira_crawler.storage import (
+        LocalArtifactStore,
+        get_store,
+        publish_latest,
+        write_diff,
+    )
     from sidira_crawler.synthesis.graph import load_raw_jsonl
     from sidira_crawler.synthesis.pack import synthesize_pack, weekly_bucket
 
@@ -126,6 +131,7 @@ def synthesize(raw_path: str, customer: str, snapshot: str | None, out_dir: str 
             "note": "diff implementation pending",
         },
     )
+    publish_latest(store, customer, snapshot)
     click.echo(
         f"Synthesized {len(pack.capabilities)} capabilities"
         f" ({', '.join(c.name for c in pack.capabilities)})"
