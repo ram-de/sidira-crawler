@@ -24,9 +24,10 @@ from sidira_crawler.synthesis.graph import ScreenGraph
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 
-#: Sanity bounds on cluster count — outside this range the LLM almost
-#: certainly produced one-screen-per-capability confetti or one giant blob.
-MIN_CAPABILITIES = 2
+#: Sanity bounds on cluster count. The ceiling catches one-screen-per-
+#: capability confetti; the floor is 1 because a scoped walk of a small app
+#: can legitimately be a single coherent capability.
+MIN_CAPABILITIES = 1
 MAX_CAPABILITIES = 12
 
 _SYSTEM_PROMPT = """You are a principal product manager reverse-engineering a

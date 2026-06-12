@@ -185,6 +185,26 @@ def test_cluster_tolerates_code_fences(raw_path):
     assert len(synthesize_clusters(graph, llm).capabilities) == 2
 
 
+def test_cluster_accepts_single_capability(raw_path):
+    # A scoped walk of a small app can be one coherent capability.
+    graph = load_raw_jsonl(raw_path)
+    single = {
+        "capabilities": [
+            {
+                "name": "brewing",
+                "user_goal": "Everything brews",
+                "screen_ids": [HOME, LOG, LOGIN],
+                "entry_screen_ids": [HOME],
+                "implicit_metric": None,
+            }
+        ],
+        "unassigned_screen_ids": [HELP],
+    }
+    llm = FakeLLM([json.dumps(single)])
+    result = synthesize_clusters(graph, llm, retries=0)
+    assert [c.name for c in result.capabilities] == ["brewing"]
+
+
 def test_cluster_retries_with_errors_then_fails(raw_path):
     graph = load_raw_jsonl(raw_path)
     bad = json.dumps({"capabilities": [], "unassigned_screen_ids": []})
