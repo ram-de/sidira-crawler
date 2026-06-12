@@ -16,6 +16,12 @@ name: crawl
 # in_progress → walking, synthesize in_progress → synthesizing). Job names
 # are part of that contract too.
 #
+# Queueing: GitHub holds at most ONE pending run per concurrency group — a
+# third dispatch for the same customer CANCELS the previously pending run
+# (the running one is never cancelled). The dispatcher must treat a run
+# that concluded `cancelled` without starting any jobs as "superseded by a
+# newer dispatch", not as a failed crawl.
+#
 # sandbox-walk.yml (PR gate, R2 optional) and synthesize-pack.yml (manual
 # synthesis of an existing walk) stay as-is; this workflow deliberately
 # mirrors their steps rather than sharing via workflow_call so the gate
@@ -84,6 +90,23 @@ jobs:
             echo "::error title=Missing secrets::Cannot crawl without: ${missing[*]}"
             exit 1
           fi
+
+      # The REST dispatch API does NOT enforce `required: true` on inputs,
+      # and customer/crawl_date/snapshot become R2 key segments and a config
+      # path — reject anything that would mis-correlate the run or escape
+      # the customer's R2 namespace before spending walk time.
+      - name: Validate inputs
+        env:
+          CRAWL_ID: ${{ inputs.crawl_id }}
+          CUSTOMER: ${{ inputs.customer }}
+          CRAWL_DATE: ${{ inputs.crawl_date }}
+          SNAPSHOT: ${{ inputs.snapshot }}
+        run: |
+          fail() { echo "::error title=Invalid input::$1"; exit 1; }
+          [ -n "$CRAWL_ID" ] || fail "crawl_id is empty — the run could not be correlated to its dispatch"
+          [[ "$CUSTOMER" =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "customer must be lowercase alphanumeric/hyphens, got: $CUSTOMER"
+          [ -z "$CRAWL_DATE" ] || [[ "$CRAWL_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || fail "crawl_date must be YYYY-MM-DD, got: $CRAWL_DATE"
+          [ -z "$SNAPSHOT" ] || [[ "$SNAPSHOT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "snapshot has characters unsafe for an R2 key segment: $SNAPSHOT"
 
       # Resolved once and shared with the synthesize job so the upload key
       # and the download key can never disagree across a midnight-UTC
@@ -213,7 +236,13 @@ jobs:
       # NOTE: this mirrors the snapshot PREFIX, which can contain stale
       # capability dirs from earlier writes at the same key — the manifest
       # is the source of truth for pack membership.
+      #
+      # continue-on-error from here down: the pointer flip above already
+      # published the pack, so a hiccup in these inspection-only steps must
+      # not conclude the run `failure` — the dispatcher would report a
+      # failed crawl while the simulator is already serving the new pack.
       - name: Mirror snapshot for artifact
+        continue-on-error: true
         env:
           CUSTOMER: ${{ inputs.customer }}
           SNAPSHOT: ${{ inputs.snapshot }}
@@ -251,6 +280,7 @@ jobs:
           EOF
 
       - name: Upload pack artifact
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: feature-pack
