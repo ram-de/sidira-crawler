@@ -1,0 +1,140 @@
+name: synthesize-pack
+
+# Phase-3 capability synthesis: download a raw sandbox walk from R2, run the
+# synthesizer (LLM clustering + reverse-PRD + reverse-Figma), and write the
+# resulting Feature Pack back to R2 under
+# customers/<customer>/featurepacks/<snapshot>/.
+#
+# Manual-trigger only: synthesis costs LLM tokens and writes immutable
+# snapshot versions, so it runs when a human (or an agent with repo access)
+# dispatches it — not on every push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      customer:
+        description: "Customer ID the pack is written under"
+        required: true
+        default: "streamly-sandbox"
+      crawl_date:
+        description: "Crawl date (YYYY-MM-DD) of the raw.jsonl in R2. Empty = today (UTC)."
+        required: false
+        default: ""
+      snapshot:
+        description: "Snapshot version tag. Empty = ISO week of the walk's run_date."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  synthesize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Check required secrets
+        run: |
+          missing=()
+          for name in R2_BUCKET R2_ENDPOINT_URL R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY GROQ_API_KEY; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error title=Missing secrets::Cannot synthesize without: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Download raw walk from R2
+        env:
+          CUSTOMER: ${{ inputs.customer }}
+          CRAWL_DATE: ${{ inputs.crawl_date }}
+        run: |
+          python - <<'EOF'
+          import datetime
+          import os
+          import boto3
+
+          date = os.environ["CRAWL_DATE"] or datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
+          key = f"customers/{os.environ['CUSTOMER']}/crawl/{date}/raw.jsonl"
+          client = boto3.client(
+              "s3",
+              endpoint_url=os.environ["R2_ENDPOINT_URL"],
+              aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+              aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+          )
+          client.download_file(os.environ["R2_BUCKET"], key, "raw.jsonl")
+          print(f"downloaded s3://{os.environ['R2_BUCKET']}/{key}")
+          EOF
+
+      # R2_BUCKET being set makes get_store() pick the R2 store, so the
+      # pack is written straight to R2 — no upload step needed.
+      - name: Synthesize Feature Pack
+        env:
+          CUSTOMER: ${{ inputs.customer }}
+          SNAPSHOT: ${{ inputs.snapshot }}
+        run: |
+          args=(--raw raw.jsonl --customer "$CUSTOMER")
+          [ -n "$SNAPSHOT" ] && args+=(--snapshot "$SNAPSHOT")
+          python -m sidira_crawler.cli synthesize "${args[@]}"
+
+      # Keep a copy as a workflow artifact for inspection without R2 access.
+      - name: Synthesize local copy for artifact
+        env:
+          CUSTOMER: ${{ inputs.customer }}
+          SNAPSHOT: ${{ inputs.snapshot }}
+        run: |
+          python - <<'EOF'
+          import os
+          from sidira_crawler.storage import LocalArtifactStore
+          from sidira_crawler.synthesis.graph import load_raw_jsonl
+          from sidira_crawler.synthesis.pack import weekly_bucket
+
+          # Re-synthesizing would double the LLM spend; instead mirror the
+          # just-written snapshot from R2 into a local directory.
+          import boto3
+
+          graph = load_raw_jsonl("raw.jsonl")
+          snapshot = os.environ["SNAPSHOT"] or weekly_bucket(graph.run_date)
+          prefix = f"customers/{os.environ['CUSTOMER']}/featurepacks/{snapshot}/"
+          client = boto3.client(
+              "s3",
+              endpoint_url=os.environ["R2_ENDPOINT_URL"],
+              aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+              aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+          )
+          paginator = client.get_paginator("list_objects_v2")
+          count = 0
+          for page in paginator.paginate(Bucket=os.environ["R2_BUCKET"], Prefix=prefix):
+              for obj in page.get("Contents", []):
+                  rel = obj["Key"][len(prefix):]
+                  dest = os.path.join("pack-artifact", rel)
+                  os.makedirs(os.path.dirname(dest), exist_ok=True)
+                  client.download_file(os.environ["R2_BUCKET"], obj["Key"], dest)
+                  count += 1
+          print(f"mirrored {count} objects from s3://{os.environ['R2_BUCKET']}/{prefix}")
+          assert count > 0, "pack prefix is empty — R2 write did not land"
+          EOF
+
+      - name: Upload pack artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-pack
+          path: pack-artifact/
+          if-no-files-found: error

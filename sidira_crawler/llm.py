@@ -34,6 +34,7 @@ class GroqClient:
                 {"role": "user", "content": user},
             ],
             max_tokens=max_tokens,
+            temperature=0.0,
         )
         return resp.choices[0].message.content or ""
 
@@ -52,6 +53,7 @@ class AnthropicClient:
             model=self._model,
             system=system,
             max_tokens=max_tokens,
+            temperature=0.0,
             messages=[{"role": "user", "content": user}],
         )
         return resp.content[0].text
