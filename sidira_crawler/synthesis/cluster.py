@@ -8,8 +8,10 @@ unassigned.
 
 The LLM proposes; this module validates. Every screen id in the response is
 checked against the graph, names are checked against the pack-layout slug
-rules, and an invalid response is retried once with the validation errors
-appended so the model can correct itself.
+rules, and an invalid response is retried with the validation errors
+appended so the model can correct itself. If the only defect left after
+retries is incomplete coverage, the dropped screens are treated as
+unassigned rather than discarding the whole clustering.
 """
 
 from __future__ import annotations
@@ -17,18 +19,24 @@ from __future__ import annotations
 import json
 import re
 
+import structlog
 from pydantic import BaseModel, Field, ValidationError
 
 from sidira_crawler.llm import LLMClient
 from sidira_crawler.synthesis.graph import ScreenGraph
 
+log = structlog.get_logger()
+
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 
 #: Sanity bounds on cluster count. The ceiling catches one-screen-per-
 #: capability confetti; the floor is 1 because a scoped walk of a small app
-#: can legitimately be a single coherent capability.
+#: can legitimately be a single coherent capability. (A full product walk of
+#: the reference sandbox clusters into ~13, so the ceiling needs headroom.)
 MIN_CAPABILITIES = 1
-MAX_CAPABILITIES = 12
+MAX_CAPABILITIES = 16
+
+_MISSING_COVERAGE_PREFIX = "every screen must be assigned or explicitly unassigned"
 
 _SYSTEM_PROMPT = """You are a principal product manager reverse-engineering a
 product's feature map from crawl data. You will receive every screen and
@@ -112,14 +120,18 @@ def render_graph_summary(graph: ScreenGraph) -> str:
     return "\n".join(lines)
 
 
-def synthesize_clusters(graph: ScreenGraph, llm: LLMClient, retries: int = 1) -> ClusterResult:
+def synthesize_clusters(graph: ScreenGraph, llm: LLMClient, retries: int = 2) -> ClusterResult:
     """Cluster the graph into capabilities via the LLM, validating the response.
 
     An invalid response (bad JSON, unknown screen ids, slug violations…) is
     retried up to ``retries`` times with the errors appended to the prompt.
+    If the final response's only defect is incomplete coverage, the dropped
+    screens are moved to unassigned instead of failing the run — losing a
+    screen to chrome is recoverable; overlap or invented ids are not.
     """
     user_prompt = render_graph_summary(graph)
     errors: list[str] = []
+    result: ClusterResult | None = None
     for _attempt in range(retries + 1):
         prompt = user_prompt
         if errors:
@@ -130,14 +142,28 @@ def synthesize_clusters(graph: ScreenGraph, llm: LLMClient, retries: int = 1) ->
             )
         raw = llm.complete(_SYSTEM_PROMPT, prompt, max_tokens=8192)
         result, errors = _parse_and_validate(raw, graph)
-        if result is not None:
+        if not errors:
+            assert result is not None
             return result
+    if result is not None and all(e.startswith(_MISSING_COVERAGE_PREFIX) for e in errors):
+        assigned = {sid for cap in result.capabilities for sid in cap.screen_ids}
+        missing = sorted(set(graph.screens) - assigned - set(result.unassigned_screen_ids))
+        log.warning("cluster.coverage_repaired", missing=missing)
+        return result.model_copy(
+            update={"unassigned_screen_ids": sorted({*result.unassigned_screen_ids, *missing})}
+        )
     raise ValueError("LLM clustering failed validation after retries: " + "; ".join(errors))
 
 
 def _parse_and_validate(
     raw: str, graph: ScreenGraph
 ) -> tuple[ClusterResult | None, list[str]]:
+    """Parse and validate one LLM response.
+
+    Returns ``(result, errors)``: ``errors`` empty means valid. ``result`` is
+    the parsed model even when invalid (None only if unparsable), so the
+    caller can repair coverage-only failures.
+    """
     try:
         result = ClusterResult.model_validate(_extract_json(raw))
     except (ValueError, ValidationError) as exc:
@@ -173,11 +199,8 @@ def _parse_and_validate(
         errors.append(f"unassigned: unknown screen ids {sorted(unknown_unassigned)}")
     missing = known - assigned - set(result.unassigned_screen_ids)
     if missing:
-        errors.append(
-            "every screen must be assigned or explicitly unassigned; missing "
-            + str(sorted(missing))
-        )
-    return (result, []) if not errors else (None, errors)
+        errors.append(f"{_MISSING_COVERAGE_PREFIX}; missing {sorted(missing)}")
+    return result, errors
 
 
 def _extract_json(raw: str) -> dict:
