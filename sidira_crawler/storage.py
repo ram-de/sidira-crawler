@@ -7,6 +7,12 @@ Layout:
             reverse-prd.md
             reverse-figma.json
         diff-vs-prior.json
+    customers/<customer_id>/featurepacks/latest   ← pointer, contents = snapshot_version
+
+The ``latest`` pointer is what downstream consumers (the simulator's
+FeaturePackLoader) resolve before reading a pack. Writing it is the publish
+step: call ``publish_latest`` only after every snapshot artifact (pack AND
+diff) is written, so the pointer never names a partially written snapshot.
 """
 
 from __future__ import annotations
@@ -16,7 +22,11 @@ import os
 from pathlib import Path
 from typing import Protocol
 
+import structlog
+
 from sidira_crawler.schema import FeaturePack
+
+log = structlog.get_logger()
 
 
 class ArtifactStore(Protocol):
@@ -87,6 +97,50 @@ def get_store() -> ArtifactStore:
         return R2ArtifactStore()
     local_root = os.environ.get("PYTHIA_CRAWLER_LOCAL_OUTPUT", "outputs")
     return LocalArtifactStore(local_root)
+
+
+def publish_latest(store: ArtifactStore, customer_id: str, snapshot_version: str) -> bool:
+    """Point ``customers/<id>/featurepacks/latest`` at a fully written snapshot.
+
+    This is the publish step — consumers resolve the pointer before reading,
+    so call it only after every snapshot artifact (pack and diff) is written.
+
+    A backfill or re-synthesis of an old snapshot must not regress the
+    pointer: if the current pointer names a newer snapshot, the publish is
+    skipped. Weekly buckets are zero-padded (``2026-W04``), so plain string
+    order is chronological. Returns True when the pointer was updated.
+    """
+    current = _read_latest(store, customer_id)
+    if current is not None and current > snapshot_version:
+        log.info(
+            "publish.latest.skipped",
+            customer_id=customer_id,
+            current=current,
+            snapshot=snapshot_version,
+        )
+        return False
+    if isinstance(store, LocalArtifactStore):
+        path = store.root / "customers" / customer_id / "featurepacks" / "latest"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(snapshot_version)
+    elif isinstance(store, R2ArtifactStore):
+        store._put(f"customers/{customer_id}/featurepacks/latest", snapshot_version)
+    return True
+
+
+def _read_latest(store: ArtifactStore, customer_id: str) -> str | None:
+    """Read the current latest pointer, or None if it has never been published."""
+    if isinstance(store, LocalArtifactStore):
+        path = store.root / "customers" / customer_id / "featurepacks" / "latest"
+        return path.read_text().strip() if path.exists() else None
+    if isinstance(store, R2ArtifactStore):
+        key = f"customers/{customer_id}/featurepacks/latest"
+        try:
+            obj = store._s3.get_object(Bucket=store._bucket, Key=key)
+        except store._s3.exceptions.NoSuchKey:
+            return None
+        return obj["Body"].read().decode("utf-8").strip()
+    return None
 
 
 def write_diff(

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from sidira_crawler.schema import FeaturePack, FeaturePackManifest, ReverseFigma
-from sidira_crawler.storage import LocalArtifactStore
+from sidira_crawler.storage import LocalArtifactStore, publish_latest
 from sidira_crawler.synthesis.cluster import (
     CapabilityCluster,
     synthesize_clusters,
@@ -346,6 +346,17 @@ def test_synthesize_pack_end_to_end(raw_path, tmp_path):
         (written / "capabilities" / "brew_logging" / "reverse-figma.json").read_text()
     )
     assert {s.id for s in figma.screens} == {HOME, LOG}
+    # The latest pointer is the publish step, separate from write_pack so a
+    # snapshot only becomes visible once every artifact (pack + diff) exists.
+    # It's what the simulator's FeaturePackLoader resolves before reading.
+    assert not (written.parent / "latest").exists()
+    assert publish_latest(store, "brewlog", "2026-W24") is True
+    assert (written.parent / "latest").read_text() == "2026-W24"
+    assert publish_latest(store, "brewlog", "2026-W25") is True
+    assert (written.parent / "latest").read_text() == "2026-W25"
+    # A backfill of an older snapshot must not regress the pointer.
+    assert publish_latest(store, "brewlog", "2026-W24") is False
+    assert (written.parent / "latest").read_text() == "2026-W25"
 
 
 def test_weekly_bucket():

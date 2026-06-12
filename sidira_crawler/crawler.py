@@ -19,7 +19,7 @@ import structlog
 from sidira_crawler.config import CapabilityConfig, load_customer_config
 from sidira_crawler.llm import get_client
 from sidira_crawler.schema import Capability, FeaturePack, FeaturePackManifest
-from sidira_crawler.storage import get_store, write_diff
+from sidira_crawler.storage import get_store, publish_latest, write_diff
 from sidira_crawler.synthesis.cluster import CapabilityCluster
 from sidira_crawler.synthesis.figma import synthesize_reverse_figma
 from sidira_crawler.synthesis.graph import ScreenGraph, graph_from_walks
@@ -87,6 +87,7 @@ def run_crawl(
 
     diff = _diff_against_prior(store, customer_id, snapshot_version, pack)
     write_diff(store, customer_id, snapshot_version, diff)
+    publish_latest(store, customer_id, snapshot_version)
 
     log.info("crawl.done", customer_id=customer_id, snapshot=snapshot_version, uri=uri)
     return uri
