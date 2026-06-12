@@ -16,11 +16,13 @@ from pathlib import Path
 
 import structlog
 
-from sidira_crawler.config import load_customer_config
+from sidira_crawler.config import CapabilityConfig, load_customer_config
 from sidira_crawler.llm import get_client
-from sidira_crawler.schema import Capability, FeaturePack, FeaturePackManifest, ReverseFigma
+from sidira_crawler.schema import Capability, FeaturePack, FeaturePackManifest
 from sidira_crawler.storage import get_store, write_diff
+from sidira_crawler.synthesis.cluster import CapabilityCluster
 from sidira_crawler.synthesis.figma import synthesize_reverse_figma
+from sidira_crawler.synthesis.graph import ScreenGraph, graph_from_walks
 from sidira_crawler.synthesis.prd import synthesize_reverse_prd
 from sidira_crawler.walker import RawWalk, walk_capability
 
@@ -57,17 +59,16 @@ def run_crawl(
                 password_env=creds.env_var_password,
             )
 
-        reverse_prd = synthesize_reverse_prd(cap_cfg.name, walks_by_role, llm)
-        reverse_figma: ReverseFigma = synthesize_reverse_figma(cap_cfg.name, walks_by_role)
-
+        graph = graph_from_walks(walks_by_role)
+        cluster = _declared_cluster(cap_cfg, graph)
         capabilities.append(
             Capability(
                 name=cap_cfg.name,
-                surfaces=list({o.url for w in walks_by_role.values() for o in w.observations}),
+                surfaces=sorted({s.route for s in graph.screens.values()}),
                 roles=cap_cfg.roles,
                 entry_points=cap_cfg.entry_points,
-                reverse_prd=reverse_prd,
-                reverse_figma=reverse_figma,
+                reverse_prd=synthesize_reverse_prd(cluster, graph, llm),
+                reverse_figma=synthesize_reverse_figma(cluster, graph),
             )
         )
 
@@ -89,6 +90,26 @@ def run_crawl(
 
     log.info("crawl.done", customer_id=customer_id, snapshot=snapshot_version, uri=uri)
     return uri
+
+
+def _declared_cluster(cap_cfg: CapabilityConfig, graph: ScreenGraph) -> CapabilityCluster:
+    """MVP path: the customer declared the capability, so the cluster is the
+    whole per-capability walk — no LLM clustering involved."""
+    screen_ids = list(graph.screens)
+    entry_routes = {_path_of(url) for url in cap_cfg.entry_points}
+    entry_ids = [s.screen_id for s in graph.screens.values() if s.route in entry_routes]
+    return CapabilityCluster(
+        name=cap_cfg.name,
+        user_goal="",
+        screen_ids=screen_ids,
+        entry_screen_ids=entry_ids or screen_ids[:1],
+    )
+
+
+def _path_of(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    return urlsplit(url).path or "/"
 
 
 def _default_config_path(customer_id: str) -> Path:
