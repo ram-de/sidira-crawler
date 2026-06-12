@@ -104,7 +104,11 @@ jobs:
         run: |
           fail() { echo "::error title=Invalid input::$1"; exit 1; }
           [ -n "$CRAWL_ID" ] || fail "crawl_id is empty — the run could not be correlated to its dispatch"
-          [[ "$CUSTOMER" =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "customer must be lowercase alphanumeric/hyphens, got: $CUSTOMER"
+          # Clerk org ids (the production tenant key, e.g. org_2NXx...) carry an
+          # underscore and mixed case, so the charset is wider than a DNS-ish
+          # slug — but still a single safe R2 key segment / filename, no
+          # leading dash. Mirrored by _CUSTOMER_RE in the simulator backend.
+          [[ "$CUSTOMER" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || fail "customer must be alphanumeric/hyphen/underscore (max 64, no leading dash), got: $CUSTOMER"
           [ -z "$CRAWL_DATE" ] || [[ "$CRAWL_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || fail "crawl_date must be YYYY-MM-DD, got: $CRAWL_DATE"
           [ -z "$SNAPSHOT" ] || [[ "$SNAPSHOT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "snapshot has characters unsafe for an R2 key segment: $SNAPSHOT"
 
