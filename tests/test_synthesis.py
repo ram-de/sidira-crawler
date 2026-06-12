@@ -205,12 +205,35 @@ def test_cluster_accepts_single_capability(raw_path):
     assert [c.name for c in result.capabilities] == ["brewing"]
 
 
+def test_cluster_repairs_coverage_only_failures(raw_path):
+    # The LLM dropped HELP entirely: after retries, the dropped screen is
+    # moved to unassigned instead of failing the run.
+    graph = load_raw_jsonl(raw_path)
+    dropped = json.loads(json.dumps(CLUSTER_JSON))
+    dropped["unassigned_screen_ids"] = []
+    llm = FakeLLM([json.dumps(dropped)])
+    result = synthesize_clusters(graph, llm, retries=0)
+    assert result.unassigned_screen_ids == [HELP]
+    assert [c.name for c in result.capabilities] == ["brew_logging", "authentication"]
+
+
+def test_cluster_does_not_repair_mixed_failures(raw_path):
+    # Coverage repair only applies when missing screens are the ONLY defect.
+    graph = load_raw_jsonl(raw_path)
+    bad = json.loads(json.dumps(CLUSTER_JSON))
+    bad["unassigned_screen_ids"] = []
+    bad["capabilities"][1]["screen_ids"].append(HOME)  # overlap too
+    llm = FakeLLM([json.dumps(bad)])
+    with pytest.raises(ValueError, match="failed validation"):
+        synthesize_clusters(graph, llm, retries=0)
+
+
 def test_cluster_retries_with_errors_then_fails(raw_path):
     graph = load_raw_jsonl(raw_path)
     bad = json.dumps({"capabilities": [], "unassigned_screen_ids": []})
     llm = FakeLLM([bad, bad])
     with pytest.raises(ValueError, match="failed validation"):
-        synthesize_clusters(graph, llm)
+        synthesize_clusters(graph, llm, retries=1)
     assert len(llm.calls) == 2
     assert "previous response was invalid" in llm.calls[1][1]
 
@@ -221,7 +244,6 @@ def test_cluster_retries_with_errors_then_fails(raw_path):
         (lambda d: d["capabilities"][0]["screen_ids"].append("/nope::s9"), "unknown screen ids"),
         (lambda d: d["capabilities"][1]["screen_ids"].append(HOME), "already assigned"),
         (lambda d: d["capabilities"][0].update(name="Brew Logging!"), "lowercase_slug"),
-        (lambda d: d.update(unassigned_screen_ids=[]), "must be assigned"),
         (
             lambda d: d["capabilities"][0].update(entry_screen_ids=[LOGIN]),
             "entry screens not in screen_ids",
