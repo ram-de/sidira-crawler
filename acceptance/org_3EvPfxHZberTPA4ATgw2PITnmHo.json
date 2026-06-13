@@ -1,0 +1,199 @@
+{
+  "_comment": [
+    "Judge config for the Streamly sandbox acceptance gate (scripts/sandbox_acceptance.py).",
+    "The judge is ALLOWED to know the sandbox: every selector, copy string, and route",
+    "below is grounded in streamly-sandbox source and real walk output. The walker",
+    "engine (sidira_crawler/) must never contain any of this.",
+    "Matchers are deterministic predicates over raw walk output — no fuzzy scoring.",
+    "Every manifest screen id needs an entry in screen_matchers; every mustDiscover",
+    "transition id needs an entry in transition_matchers. The harness hard-errors on gaps."
+  ],
+  "_entry_paths_comment": [
+    "Each entry path is its own walk on a freshly booted sandbox; a role's walks",
+    "are merged (screen-id union) for screen coverage, while transition matchers",
+    "must hold within a single walk. /my-list (guest) exercises the guarded-URL",
+    "login wall + next= round-trip; /account/plan (member, premium) puts the",
+    "plan/upgrade/downloads screens within depth reach of the post-login walk.",
+    "Secondary entries carry per-walk depth overrides — they exist to reach",
+    "specific deep states, not to re-explore everything. Hop arithmetic verified",
+    "against real walk graphs: guest /my-list lands ON the login wall (hop 0),",
+    "so depth 2 keeps one hop of context; member/premium /account/plan reach the",
+    "plan page at hop 2 (login submit 1, profile select 2 via forwarded next=)",
+    "and the upgrade-confirm stage at hop 3, so depth 5 keeps headroom for the",
+    "confirm->done hop while skipping the redundant deep re-crawl of /browse."
+  ],
+  "depth": 6,
+  "determinism_role": "member",
+  "roles": {
+    "guest": {
+      "username": null,
+      "password": null,
+      "threshold": 0.8,
+      "entry_paths": ["/", {"path": "/my-list", "depth": 2}]
+    },
+    "member": {
+      "username": "member@streamly.test",
+      "password": "watchmore",
+      "threshold": 0.8,
+      "entry_paths": ["/", {"path": "/account/plan", "depth": 5}]
+    },
+    "premium": {
+      "username": "premium@streamly.test",
+      "password": "watchmore4k",
+      "threshold": 0.8,
+      "entry_paths": ["/", {"path": "/account/plan", "depth": 5}]
+    }
+  },
+  "screen_matchers": {
+    "landing": {
+      "kind": "observation",
+      "route": "/",
+      "copy_regex": "Unlimited stories\\. One small price\\."
+    },
+    "login": {
+      "kind": "observation",
+      "route": "/login",
+      "flags": ["login"]
+    },
+    "login-wall": {
+      "kind": "observation",
+      "route": "/login",
+      "flags": ["login"],
+      "url_contains": "next="
+    },
+    "signup-step-1": {
+      "kind": "observation",
+      "route": "/signup",
+      "copy_regex": "Create your account"
+    },
+    "signup-step-2": {
+      "kind": "observation",
+      "route": "/signup",
+      "copy_regex": "Choose a password"
+    },
+    "signup-step-3": {
+      "kind": "observation",
+      "route": "/signup",
+      "copy_regex": "Pick your plan"
+    },
+    "help": {
+      "kind": "observation",
+      "route": "/help",
+      "copy_regex": "Help Center"
+    },
+    "consent-banner": {
+      "kind": "observation",
+      "copy_regex": "Streamly uses cookies"
+    },
+    "profiles": {
+      "kind": "observation",
+      "route": "/profiles",
+      "flags": ["chooser"],
+      "copy_regex": "Who's watching\\?"
+    },
+    "browse-eager": {
+      "kind": "observation",
+      "route": "/browse",
+      "flags_absent": ["exhausted", "dialog"],
+      "testid_absent": "end-of-catalog"
+    },
+    "browse-lazy-rows": {
+      "kind": "observation",
+      "route": "/browse",
+      "copy_regex": "Trending Now"
+    },
+    "browse-end-of-catalog": {
+      "kind": "observation",
+      "route": "/browse",
+      "testid": "end-of-catalog"
+    },
+    "browse-4k-row": {
+      "kind": "observation",
+      "route": "/browse",
+      "copy_regex": "4K Ultra HD"
+    },
+    "title-modal": {
+      "kind": "observation",
+      "route": "/title/:id",
+      "flags": ["dialog"]
+    },
+    "watch": {
+      "kind": "observation",
+      "route": "/watch/:id",
+      "copy_regex": "Now playing"
+    },
+    "search": {
+      "kind": "observation",
+      "route": "/search",
+      "copy_regex": "Titles, genres, descriptions\\."
+    },
+    "my-list": {
+      "kind": "observation",
+      "route": "/my-list",
+      "copy_regex": "Saved for later\\."
+    },
+    "kids": {
+      "kind": "observation",
+      "route": "/kids",
+      "copy_regex": "Shows rated for younger viewers\\."
+    },
+    "account": {
+      "kind": "observation",
+      "route": "/account",
+      "copy_regex": "Playback settings"
+    },
+    "plan": {
+      "kind": "observation",
+      "route": "/account/plan",
+      "copy_regex": "Current plan"
+    },
+    "plan-upgrade-confirm": {
+      "kind": "observation",
+      "route": "/account/plan",
+      "copy_regex": "Confirm upgrade"
+    },
+    "plan-upgrade-done": {
+      "kind": "observation",
+      "route": "/account/plan",
+      "copy_regex": "Order confirmed!"
+    },
+    "plan-downloads": {
+      "kind": "observation",
+      "route": "/account/plan",
+      "copy_regex": "Available offline on this device\\."
+    }
+  },
+  "transition_matchers": {
+    "t-next-roundtrip": {
+      "kind": "login-roundtrip",
+      "trigger": "submit login form",
+      "param": "next"
+    },
+    "t-browse-scroll-lazy": {
+      "kind": "scroll-growth",
+      "trigger": "scroll feed",
+      "route": "/browse",
+      "to_copy_regex": "Trending Now"
+    }
+  },
+  "_evidence_notes": {
+    "landing": "hero h1 in src/pages/Landing.jsx; seen in smoke walks.",
+    "login": "walker 'login' flag = visible password input; /login is the only password form at its own route.",
+    "login-wall": "RequireAuth (src/auth.jsx) redirects guests to /login?next=<path>. No guest-visible link targets an authed route, so a link-following walker can only reach this via direct guarded-URL navigation.",
+    "signup-step-1": "step-1 h1 in src/pages/Signup.jsx; seen in smoke walks.",
+    "signup-step-2": "step-2 h1 'Choose a password' (client-side state, same URL).",
+    "signup-step-3": "step-3 h1 'Pick your plan'.",
+    "consent-banner": "banner copy in src/components/ConsentBanner.jsx; rides any route, so no route predicate.",
+    "profiles": "chooser flag = walker's interstitial heuristic; h1 in src/pages/Profiles.jsx.",
+    "browse-eager": "pre-scroll /browse: no end-of-catalog testid, no exhausted flag, no dialog. Absence-based by design — the eager state may be captured during its skeleton render phase, which the manifest counts as the same screen.",
+    "browse-lazy-rows": "'Trending Now' is a page-2 themed collection row (server/catalog.js) — present only after lazy rows + infinite scroll pages render.",
+    "browse-end-of-catalog": "data-testid='end-of-catalog' in src/pages/Browse.jsx.",
+    "browse-4k-row": "row name '4K Ultra HD' (server/catalog.js fourKRow) leads page 1 for premium only; on /browse members only ever see plain '4K' poster badges.",
+    "t-browse-scroll-lazy": "'Trending Now' is a page-2 themed collection row from server/catalog.js, present only after lazy rows + infinite-scroll pages render — requiring it in the scroll's to-observation (to_copy_regex) proves the lazy content actually appeared; a screen-digest change alone could be any DOM mutation.",
+    "title-modal": "role=dialog aria-modal in src/components/TitleModal.jsx at deep-linkable /title/:id.",
+    "watch": "'Now playing ·' quality line in src/pages/Watch.jsx; seen in smoke walks.",
+    "plan-upgrade-confirm": "'Confirm upgrade' button only in the confirm stage of src/pages/Plan.jsx.",
+    "plan-upgrade-done": "'Order confirmed!' only in the done stage.",
+    "plan-downloads": "'Available offline on this device.' only in the premium Downloads section."
+  }
+}
