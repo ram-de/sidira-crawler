@@ -10,6 +10,7 @@ import click
 
 from sidira_crawler import __version__
 from sidira_crawler.crawler import run_crawl
+from sidira_crawler.honesty import HonestyGateError
 from sidira_crawler.walker import DEFAULT_DEPTH
 from sidira_crawler.walker import walk as run_walk
 
@@ -34,8 +35,17 @@ def cli() -> None:
     help="Path to customer config YAML. Defaults to config/customers/<customer>.yaml.",
 )
 def run(customer: str, snapshot: str, config_path: str | None) -> None:
-    """Run a full weekly crawl for a customer."""
-    uri = run_crawl(customer_id=customer, snapshot_version=snapshot, config_path=config_path)
+    """Run a full weekly crawl for a customer.
+
+    On an honesty-gate failure the crawl publishes nothing and this command
+    prints the gate report to stderr and exits non-zero, so a failed cron run
+    is loud and the prior snapshot's ``latest`` pointer is left intact.
+    """
+    try:
+        uri = run_crawl(customer_id=customer, snapshot_version=snapshot, config_path=config_path)
+    except HonestyGateError as exc:
+        click.echo(str(exc), err=True)
+        raise click.ClickException("honesty gate failed — nothing was published") from exc
     click.echo(f"Pack written to: {uri}")
 
 
