@@ -974,6 +974,70 @@ def write_raw_jsonl(
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+_PULLED_CREDENTIALS_ENV = "SIDIRA_CRAWL_CREDENTIALS"
+
+
+def apply_pulled_credentials(config: dict) -> list[str]:
+    """Overlay role logins pulled from the simulator onto the judge config.
+
+    The PULL credential model (sidira-simulator #206 Slice C): per-customer
+    passwords are entered in the crawl-setup window, encrypted at rest, and
+    delivered to CI ONLY over an authenticated endpoint
+    (``GET /internal/crawl-credentials/{customer}``) — never committed to
+    ``acceptance/*.json`` and never carried in the dispatch payload. The crawl
+    workflow fetches that response, masks each password, and hands the whole
+    JSON to this script in ``SIDIRA_CRAWL_CREDENTIALS``.
+
+    When the env var is absent — the streamly-sandbox demo, or any tenant with
+    no stored credentials (the pull 404s) — the inline judge-config creds are
+    left untouched. A role present in the pull but not in this config is ignored
+    (the config is the source of truth for which roles actually walk). But once a
+    pull succeeds it is authoritative: if it omits any config role that expects a
+    login, this raises rather than crawl that role with stale fallback creds.
+    Returns the sorted role names whose creds were overridden, for a non-secret
+    log line.
+    """
+    raw = os.environ.get(_PULLED_CREDENTIALS_ENV, "").strip()
+    if not raw:
+        return []
+    try:
+        logins = json.loads(raw)["logins"]
+        pulled = {lg["role"]: (lg["username"], lg["password"]) for lg in logins}
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        # The workflow set the var, so the pull was supposed to succeed; a
+        # malformed payload must fail loudly, not silently fall back to stale
+        # config creds.
+        raise SystemExit(
+            f"{_PULLED_CREDENTIALS_ENV} is set but is not valid credential JSON: {exc}"
+        )
+    # The pull is authoritative once it succeeds: every config role that expects
+    # a login (a non-null username/password in the checked-in config) MUST be
+    # covered. Overlaying only the covered subset would silently crawl the rest
+    # with stale fallback creds — fail loudly instead, mirroring the simulator's
+    # own 409-on-incomplete (sidira-simulator #206 Slice C).
+    login_roles = {
+        role
+        for role, spec in config["roles"].items()
+        if spec.get("username") or spec.get("password")
+    }
+    missing = sorted(login_roles - pulled.keys())
+    if missing:
+        raise SystemExit(
+            f"{_PULLED_CREDENTIALS_ENV} delivered logins for {sorted(pulled)} but "
+            f"the judge config needs logins for {missing} — re-save the crawl "
+            f"setup so every role has stored credentials"
+        )
+    # Overlay ONLY the config's login roles. A pulled login for a no-login role
+    # (e.g. guest, whose checked-in creds are null) is ignored — the config
+    # decides which roles authenticate, the pull only supplies their secrets.
+    applied = sorted(login_roles)
+    for role in applied:
+        username, password = pulled[role]
+        config["roles"][role]["username"] = username
+        config["roles"][role]["password"] = password
+    return applied
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     source = parser.add_mutually_exclusive_group(required=True)
@@ -1010,6 +1074,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--jobs must be >= 1")
 
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    # Overlay pulled per-customer logins (PULL model) before the config's creds
+    # are read into the walk plan below. No-op when nothing was pulled.
+    overridden = apply_pulled_credentials(config)
+    if overridden:
+        print(f"applied pulled credentials for roles: {', '.join(sorted(overridden))}")
     default_depth = args.depth if args.depth is not None else config.get("depth", 6)
     det_role = config.get("determinism_role", "member")
 
