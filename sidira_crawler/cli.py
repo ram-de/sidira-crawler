@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
 
@@ -43,6 +44,65 @@ def run(customer: str, snapshot: str, config_path: str | None) -> None:
     """
     try:
         uri = run_crawl(customer_id=customer, snapshot_version=snapshot, config_path=config_path)
+    except HonestyGateError as exc:
+        click.echo(str(exc), err=True)
+        raise click.ClickException("honesty gate failed — nothing was published") from exc
+    click.echo(f"Pack written to: {uri}")
+
+
+@cli.command(name="run-dispatch")
+@click.option("--customer", required=True, help="Customer ID (Clerk org id for a real tenant).")
+@click.option(
+    "--crawl-date",
+    required=True,
+    help="Walk date (YYYY-MM-DD). Used for the default snapshot tag.",
+)
+@click.option(
+    "--snapshot",
+    default=None,
+    help="Snapshot version tag. Empty = ISO week of --crawl-date.",
+)
+@click.option(
+    "--config-json-env",
+    default="CONFIG_JSON",
+    show_default=True,
+    help=(
+        "Name of the env var holding the simulator's dispatch config_json. Read "
+        "from the environment, never from a shell arg, so its contents cannot inject."
+    ),
+)
+def run_dispatch(
+    customer: str, crawl_date: str, snapshot: str | None, config_json_env: str
+) -> None:
+    """Run a production crawl from the simulator's dispatch ``config_json`` (#23).
+
+    Bridges the dispatch payload (sidira-simulator #206) and the credentials
+    pulled into ``SIDIRA_CRAWL_CREDENTIALS`` into a ``CustomerConfig``, then runs
+    the full honesty-gated chain (walk → gate → synthesize → publish). On a gate
+    failure nothing is published and this exits non-zero, leaving the prior
+    snapshot's ``latest`` pointer intact.
+    """
+    from sidira_crawler.dispatch import apply_pulled_credentials, build_customer_config
+    from sidira_crawler.synthesis.pack import weekly_bucket
+
+    raw = (os.environ.get(config_json_env) or "").strip()
+    if not raw:
+        raise click.UsageError(f"{config_json_env} is empty — no dispatch config to crawl")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise click.UsageError(f"{config_json_env} is not valid JSON: {exc}") from exc
+
+    try:
+        config = build_customer_config(payload, customer_id=customer)
+        applied = apply_pulled_credentials(config)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"applied credentials for roles: {', '.join(applied)}")
+
+    snapshot = snapshot or weekly_bucket(crawl_date)
+    try:
+        uri = run_crawl(customer_id=customer, snapshot_version=snapshot, config=config)
     except HonestyGateError as exc:
         click.echo(str(exc), err=True)
         raise click.ClickException("honesty gate failed — nothing was published") from exc
