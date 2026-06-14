@@ -124,6 +124,57 @@ jobs:
           echo "crawl_date=$date" >> "$GITHUB_OUTPUT"
           echo "crawl date: $date"
 
+      # Pull per-customer login credentials from the simulator (PULL model,
+      # sidira-simulator #206 Slice C). Passwords are entered in the crawl-setup
+      # window, encrypted at rest, and delivered ONLY over this authenticated
+      # endpoint — never committed to acceptance/*.json, never carried in the
+      # workflow_dispatch payload. The walker overlays them via
+      # SIDIRA_CRAWL_CREDENTIALS (see scripts/sandbox_acceptance.py).
+      #
+      # 404 is NOT an error: the streamly-sandbox demo and any tenant that has
+      # not saved logins yet have nothing to deliver, so the run falls back to
+      # the inline judge-config creds. Any other non-200 (401/403/5xx) is a hard
+      # failure — we will not silently crawl with stale creds when the pull was
+      # meant to succeed. Without the token configured at all, also fall back.
+      - name: Pull crawl credentials
+        env:
+          CUSTOMER: ${{ inputs.customer }}
+          CREDENTIALS_TOKEN: ${{ secrets.SIDIRA_CRAWLER_CREDENTIALS_TOKEN }}
+          API_BASE: ${{ vars.SIDIRA_API_BASE || 'https://api.sidira.ai' }}
+        run: |
+          if [ -z "$CREDENTIALS_TOKEN" ]; then
+            echo "::notice title=No credential token::SIDIRA_CRAWLER_CREDENTIALS_TOKEN unset — using inline judge-config creds"
+            exit 0
+          fi
+          body="$(mktemp)"
+          code="$(curl -sS -o "$body" -w '%{http_code}' \
+            -H "Authorization: Bearer ${CREDENTIALS_TOKEN}" \
+            "${API_BASE}/internal/crawl-credentials/${CUSTOMER}")"
+          if [ "$code" = "404" ]; then
+            echo "::notice title=No stored credentials::no credentials saved for ${CUSTOMER} (404) — using inline judge-config creds"
+            rm -f "$body"; exit 0
+          fi
+          if [ "$code" != "200" ]; then
+            echo "::error title=Credential pull failed::GET /internal/crawl-credentials/${CUSTOMER} returned ${code}"
+            rm -f "$body"; exit 1
+          fi
+          # Mask every pulled password BEFORE it can reach any later log line.
+          # Read line by line so a password containing spaces is masked whole.
+          jq -r '.logins[].password' "$body" | while IFS= read -r pw; do
+            [ -n "$pw" ] && echo "::add-mask::${pw}"
+          done
+          # Hand the whole response to the walker as one env var. Passwords are
+          # already registered as masks; usernames are not secret. Heredoc form
+          # is multiline-safe even though the body is single-line JSON.
+          {
+            echo "SIDIRA_CRAWL_CREDENTIALS<<__SIDIRA_CREDS_EOF__"
+            cat "$body"
+            echo
+            echo "__SIDIRA_CREDS_EOF__"
+          } >> "$GITHUB_ENV"
+          echo "pulled credentials for roles: $(jq -r '[.logins[].role] | join(", ")' "$body")"
+          rm -f "$body"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

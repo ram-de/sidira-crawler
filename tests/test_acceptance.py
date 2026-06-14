@@ -8,6 +8,7 @@ processes) is exercised by the real acceptance run, not here.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -930,3 +931,119 @@ def test_shipped_config_entry_depths():
     assert sa.role_entry_specs(config, "guest") == [("/", 6), ("/my-list", 2)]
     assert sa.role_entry_specs(config, "member") == [("/", 6), ("/account/plan", 5)]
     assert sa.role_entry_specs(config, "premium") == [("/", 6), ("/account/plan", 5)]
+
+
+# --------------------------------------------------------------------------
+# Pulled credential overlay (PULL model, sidira-simulator #206 Slice C)
+# --------------------------------------------------------------------------
+
+
+def _cred_config():
+    """Minimal judge config carrying the role shape apply_pulled_credentials
+    overlays onto — guest has no login, member/premium do."""
+    return {
+        "roles": {
+            "guest": {"username": None, "password": None},
+            "member": {"username": "config-member@x.test", "password": "config-mbr-pw"},
+            "premium": {"username": "config-premium@x.test", "password": "config-prm-pw"},
+        }
+    }
+
+
+def _creds_env(*logins):
+    return json.dumps({"customer_id": "c", "logins": list(logins)})
+
+
+def test_pulled_credentials_overlay_overrides_config(monkeypatch):
+    config = _cred_config()
+    monkeypatch.setenv(
+        sa._PULLED_CREDENTIALS_ENV,
+        _creds_env(
+            {"role": "member", "username": "real-member@x.test", "password": "real-mbr-pw"},
+            {"role": "premium", "username": "real-premium@x.test", "password": "real-prm-pw"},
+        ),
+    )
+    applied = sa.apply_pulled_credentials(config)
+    assert applied == ["member", "premium"]
+    assert config["roles"]["member"] == {
+        "username": "real-member@x.test",
+        "password": "real-mbr-pw",
+    }
+    assert config["roles"]["premium"]["password"] == "real-prm-pw"
+    # The no-login role is untouched.
+    assert config["roles"]["guest"] == {"username": None, "password": None}
+
+
+def test_pulled_credentials_absent_is_noop(monkeypatch):
+    monkeypatch.delenv(sa._PULLED_CREDENTIALS_ENV, raising=False)
+    config = _cred_config()
+    before = json.loads(json.dumps(config))
+    assert sa.apply_pulled_credentials(config) == []
+    assert config == before
+
+
+def test_pulled_credentials_blank_env_is_noop(monkeypatch):
+    monkeypatch.setenv(sa._PULLED_CREDENTIALS_ENV, "   ")
+    config = _cred_config()
+    assert sa.apply_pulled_credentials(config) == []
+    assert config["roles"]["member"]["password"] == "config-mbr-pw"
+
+
+def test_pulled_credentials_extra_role_is_ignored(monkeypatch):
+    config = _cred_config()
+    # Covers both config login roles PLUS an extra role this config doesn't walk;
+    # the extra is ignored, the known ones apply, and completeness holds.
+    monkeypatch.setenv(
+        sa._PULLED_CREDENTIALS_ENV,
+        _creds_env(
+            {"role": "member", "username": "real-member@x.test", "password": "real-mbr-pw"},
+            {"role": "premium", "username": "real-premium@x.test", "password": "real-prm-pw"},
+            {"role": "admin", "username": "a@x.test", "password": "adm-pw"},
+        ),
+    )
+    assert sa.apply_pulled_credentials(config) == ["member", "premium"]
+    assert "admin" not in config["roles"]
+    assert config["roles"]["member"]["password"] == "real-mbr-pw"
+
+
+def test_pulled_credentials_never_authenticates_a_no_login_role(monkeypatch):
+    """A pulled login for a config no-login role (guest) must be ignored — the
+    config decides which roles authenticate, the pull only supplies secrets
+    (codex P2)."""
+    config = _cred_config()
+    monkeypatch.setenv(
+        sa._PULLED_CREDENTIALS_ENV,
+        _creds_env(
+            {"role": "member", "username": "real-member@x.test", "password": "real-mbr-pw"},
+            {"role": "premium", "username": "real-premium@x.test", "password": "real-prm-pw"},
+            {"role": "guest", "username": "sneaky@x.test", "password": "sneaky-pw"},
+        ),
+    )
+    assert sa.apply_pulled_credentials(config) == ["member", "premium"]
+    # guest stays anonymous despite a pulled login.
+    assert config["roles"]["guest"] == {"username": None, "password": None}
+
+
+def test_pulled_credentials_partial_pull_hard_fails(monkeypatch):
+    """A successful pull that omits a configured login role must fail, not crawl
+    that role with stale checked-in creds (codex P2)."""
+    config = _cred_config()  # login roles: member, premium
+    monkeypatch.setenv(
+        sa._PULLED_CREDENTIALS_ENV,
+        _creds_env({"role": "member", "username": "real-member@x.test", "password": "real-mbr-pw"}),
+    )
+    with pytest.raises(SystemExit) as exc:
+        sa.apply_pulled_credentials(config)
+    assert "premium" in str(exc.value)
+
+
+def test_pulled_credentials_malformed_json_raises(monkeypatch):
+    monkeypatch.setenv(sa._PULLED_CREDENTIALS_ENV, "{not json")
+    with pytest.raises(SystemExit):
+        sa.apply_pulled_credentials(_cred_config())
+
+
+def test_pulled_credentials_missing_logins_key_raises(monkeypatch):
+    monkeypatch.setenv(sa._PULLED_CREDENTIALS_ENV, json.dumps({"customer_id": "c"}))
+    with pytest.raises(SystemExit):
+        sa.apply_pulled_credentials(_cred_config())
