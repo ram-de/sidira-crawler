@@ -43,16 +43,23 @@ def run_crawl(
     customer_id: str,
     snapshot_version: str,
     config_path: str | Path | None = None,
+    config: CustomerConfig | None = None,
 ) -> str:
     """Run a full weekly crawl for a customer. Returns the artifact URI.
+
+    The config can be supplied two ways: pass ``config`` directly (the dispatch
+    path builds one from the simulator's ``config_json`` — see
+    :mod:`sidira_crawler.dispatch`), or leave it ``None`` to load YAML from
+    ``config_path`` / the default per-customer path (the cron path).
 
     Raises :class:`~sidira_crawler.honesty.HonestyGateError` if the crawl fails
     the honesty gate (a crash, a missed declared route, or a non-deterministic
     re-walk). On failure NOTHING is written or published — the prior snapshot's
     ``latest`` pointer is left untouched.
     """
-    cfg_path = Path(config_path) if config_path else _default_config_path(customer_id)
-    config = load_customer_config(cfg_path)
+    if config is None:
+        cfg_path = Path(config_path) if config_path else _default_config_path(customer_id)
+        config = load_customer_config(cfg_path)
     if config.customer_id != customer_id:
         raise ValueError(
             f"Config customer_id {config.customer_id} does not match arg {customer_id}"

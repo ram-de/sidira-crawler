@@ -1,11 +1,17 @@
 name: crawl
 
 # Product-dispatched crawl: the single entry point the simulator backend
-# fires via the GitHub API (sidira-simulator #193). Runs the full chain —
-# walk the sandbox → upload raw.jsonl to R2 → synthesize the Feature Pack →
-# publish the `latest` pointer (inside `cli synthesize`). The pointer flip
-# IS the publish: the simulator picks up the new snapshot with no further
-# step.
+# fires via the GitHub API (sidira-simulator #193). Two modes share this
+# workflow (selected by the "Select crawl mode" step):
+#   mock (streamly-sandbox / no config_json) — boot the sandbox image, judge
+#     against its ground-truth manifest (walk job), then synthesize + publish
+#     (synthesize job). The chain is walk → upload raw.jsonl to R2 → synthesize
+#     → flip `latest`.
+#   production (#23, real tenant with a saved config_json) — run the whole
+#     honesty-gated chain inside the walk job: walk the live sandbox → gate →
+#     synthesize → flip `latest`. The synthesize job is skipped.
+# Either way the `latest` pointer flip IS the publish: the simulator picks up
+# the new snapshot with no further step.
 #
 # Correlation: workflow_dispatch returns no run id, so the dispatcher
 # generates a `crawl_id` and finds its run by `display_title` — that is why
@@ -46,7 +52,7 @@ on:
         required: false
         default: ""
       config_json:
-        description: "Non-secret saved crawl setup (JSON) from the simulator backend (sidira-simulator #206). Empty = streamly-sandbox mock acceptance path. Drives the production walk once credential support lands (#219)."
+        description: "Non-secret saved crawl setup (JSON) from the simulator backend (sidira-simulator #206). Empty = streamly-sandbox mock acceptance path. For a real tenant it drives the production walk → honesty gate → synthesize → publish chain (#23)."
         required: false
         default: ""
 
@@ -68,6 +74,7 @@ jobs:
     timeout-minutes: 30
     outputs:
       crawl_date: ${{ steps.date.outputs.crawl_date }}
+      mode: ${{ steps.mode.outputs.mode }}
     env:
       # The only sandbox today. When a second customer exists, map
       # customer → image here (or in a checked-in JSON) instead of branching
@@ -127,6 +134,30 @@ jobs:
           date="${CRAWL_DATE:-$(date -u +%F)}"
           echo "crawl_date=$date" >> "$GITHUB_OUTPUT"
           echo "crawl date: $date"
+
+      # Two crawl modes share this workflow (#23):
+      #   production — a real tenant that shipped a saved crawl setup. Walks the
+      #     customer's live sandbox_url through run_crawl (walk → honesty gate →
+      #     synthesize → publish), all in THIS job: the gate's determinism
+      #     re-walk needs the live sandbox + credentials, so it cannot be split
+      #     into the downstream synthesize job. config_json is read from env,
+      #     never interpolated into the shell, so its contents can't inject.
+      #   mock — streamly-sandbox (or any tenant with no config_json). Boots the
+      #     sandbox docker image and judges against its ground-truth manifest via
+      #     scripts/sandbox_acceptance.py, then the synthesize job builds + publishes.
+      - name: Select crawl mode
+        id: mode
+        env:
+          CUSTOMER: ${{ inputs.customer }}
+          CONFIG_JSON: ${{ inputs.config_json }}
+        run: |
+          if [ -n "$CONFIG_JSON" ] && [ "$CUSTOMER" != "streamly-sandbox" ]; then
+            echo "mode=production" >> "$GITHUB_OUTPUT"
+            echo "crawl mode: production (saved setup, real tenant '$CUSTOMER')"
+          else
+            echo "mode=mock" >> "$GITHUB_OUTPUT"
+            echo "crawl mode: mock sandbox acceptance ('$CUSTOMER')"
+          fi
 
       # Pull per-customer login credentials from the simulator (PULL model,
       # sidira-simulator #206 Slice C). Passwords are entered in the crawl-setup
@@ -189,32 +220,23 @@ jobs:
           pip install -e ".[dev]"
           playwright install --with-deps chromium
 
+      # Mock-only: only the sandbox-image boot pulls from GHCR. The production
+      # path walks the customer's live sandbox_url and never touches docker.
       - name: Log in to GHCR
+        if: steps.mode.outputs.mode == 'mock'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       # --jobs 3: see sandbox-walk.yml — walks are independent and output
       # order is plan-fixed, so raw.jsonl is identical to a sequential run.
       # The acceptance gate runs here too: a walk that fails its own
-      # coverage gate must not become a published pack.
-      # PR1 (sidira-simulator #206, sandbox-preserving half): the simulator now
-      # ships the saved crawl setup as `config_json`. The production walk it
-      # describes can't run yet — run_crawl() authenticates per role via
-      # env_var_user/env_var_password, and those credentials arrive with Slice C
-      # (#219 / envelope encryption #21). Until then a configured (non-sandbox)
-      # tenant FAILS FAST with a clear message rather than silently emitting a
-      # wrong, sandbox-shaped pack. streamly-sandbox carries no config_json and
-      # keeps the mock acceptance path unchanged. config_json is read from env,
-      # never interpolated into the shell, so its contents can't inject.
-      - name: Walk sandbox
+      # coverage gate must not become a published pack. The synthesize job
+      # downstream turns this raw.jsonl into the published pack.
+      - name: Walk sandbox (mock acceptance)
+        if: steps.mode.outputs.mode == 'mock'
         env:
           CUSTOMER: ${{ inputs.customer }}
           CRAWL_DATE: ${{ steps.date.outputs.crawl_date }}
-          CONFIG_JSON: ${{ inputs.config_json }}
         run: |
-          if [ -n "$CONFIG_JSON" ] && [ "$CUSTOMER" != "streamly-sandbox" ]; then
-            echo "::error title=Production walk not yet enabled::Received config_json for '$CUSTOMER', but the production walk cannot authenticate until credential support lands (sidira-simulator #219). No pack was published."
-            exit 1
-          fi
           python scripts/sandbox_acceptance.py \
             --image "$SANDBOX_IMAGE" \
             --config "acceptance/${CUSTOMER}.json" \
@@ -222,8 +244,32 @@ jobs:
             --out raw.jsonl \
             --jobs 3
 
+      # Production path (#23): a real tenant's saved setup arrives as config_json
+      # and its logins as SIDIRA_CRAWL_CREDENTIALS (set by "Pull crawl
+      # credentials" above). run-dispatch fuses both into a CustomerConfig and
+      # runs the whole honesty-gated chain — walk the live sandbox → gate →
+      # synthesize → flip `latest` — entirely in this job, because the gate's
+      # determinism re-walk needs the live sandbox and credentials. The
+      # honesty gate (#206 Slice D) is the safety net: a failing crawl publishes
+      # nothing and exits non-zero. config_json is read from env (CONFIG_JSON),
+      # never interpolated into the shell, so its contents can't inject.
+      - name: Crawl, gate, synthesize and publish (production)
+        if: steps.mode.outputs.mode == 'production'
+        env:
+          CUSTOMER: ${{ inputs.customer }}
+          CRAWL_DATE: ${{ steps.date.outputs.crawl_date }}
+          SNAPSHOT: ${{ inputs.snapshot }}
+          CONFIG_JSON: ${{ inputs.config_json }}
+        run: |
+          args=(--customer "$CUSTOMER" --crawl-date "$CRAWL_DATE" --config-json-env CONFIG_JSON)
+          [ -n "$SNAPSHOT" ] && args+=(--snapshot "$SNAPSHOT")
+          python -m sidira_crawler.cli run-dispatch "${args[@]}"
+
+      # Mock-only: the production path writes its pack straight to R2 and never
+      # produces a local raw.jsonl. `always()` so a failed-but-attempted mock
+      # walk still uploads its partial raw for debugging.
       - name: Upload raw walk artifact
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'mock'
         uses: actions/upload-artifact@v4
         with:
           name: raw-jsonl
@@ -231,6 +277,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload raw.jsonl to R2
+        if: steps.mode.outputs.mode == 'mock'
         env:
           CUSTOMER: ${{ inputs.customer }}
           CRAWL_DATE: ${{ steps.date.outputs.crawl_date }}
@@ -250,8 +297,14 @@ jobs:
           print(f"uploaded raw.jsonl -> s3://{os.environ['R2_BUCKET']}/{key}")
           EOF
 
+  # Mock path only. The production path already synthesized + published inside
+  # the walk job (run-dispatch), so this job is skipped for real tenants — the
+  # backend simply never observes a "synthesizing" phase for a production crawl;
+  # the run still concludes success on the walk job and the `latest` flip the
+  # production path performed is the publish event the simulator picks up.
   synthesize:
     needs: walk
+    if: needs.walk.outputs.mode == 'mock'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
