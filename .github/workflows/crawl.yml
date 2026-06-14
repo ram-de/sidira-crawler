@@ -45,6 +45,10 @@ on:
         description: "Snapshot version tag. Empty = ISO week of the walk's run_date."
         required: false
         default: ""
+      config_json:
+        description: "Non-secret saved crawl setup (JSON) from the simulator backend (sidira-simulator #206). Empty = streamly-sandbox mock acceptance path. Drives the production walk once credential support lands (#219)."
+        required: false
+        default: ""
 
 run-name: "crawl ${{ inputs.crawl_id }} · ${{ inputs.customer }}"
 
@@ -141,11 +145,25 @@ jobs:
       # order is plan-fixed, so raw.jsonl is identical to a sequential run.
       # The acceptance gate runs here too: a walk that fails its own
       # coverage gate must not become a published pack.
+      # PR1 (sidira-simulator #206, sandbox-preserving half): the simulator now
+      # ships the saved crawl setup as `config_json`. The production walk it
+      # describes can't run yet — run_crawl() authenticates per role via
+      # env_var_user/env_var_password, and those credentials arrive with Slice C
+      # (#219 / envelope encryption #21). Until then a configured (non-sandbox)
+      # tenant FAILS FAST with a clear message rather than silently emitting a
+      # wrong, sandbox-shaped pack. streamly-sandbox carries no config_json and
+      # keeps the mock acceptance path unchanged. config_json is read from env,
+      # never interpolated into the shell, so its contents can't inject.
       - name: Walk sandbox
         env:
           CUSTOMER: ${{ inputs.customer }}
           CRAWL_DATE: ${{ steps.date.outputs.crawl_date }}
+          CONFIG_JSON: ${{ inputs.config_json }}
         run: |
+          if [ -n "$CONFIG_JSON" ] && [ "$CUSTOMER" != "streamly-sandbox" ]; then
+            echo "::error title=Production walk not yet enabled::Received config_json for '$CUSTOMER', but the production walk cannot authenticate until credential support lands (sidira-simulator #219). No pack was published."
+            exit 1
+          fi
           python scripts/sandbox_acceptance.py \
             --image "$SANDBOX_IMAGE" \
             --config "acceptance/${CUSTOMER}.json" \
