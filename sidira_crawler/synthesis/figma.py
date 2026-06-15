@@ -44,10 +44,15 @@ def synthesize_reverse_figma(cluster: CapabilityCluster, graph: ScreenGraph) -> 
         _build_screen(graph.screens[sid], graph.out_edges(sid), graph)
         for sid in cluster.screen_ids
     ]
+    # Keep every edge whose SOURCE is in the cluster, even when the target
+    # landed in another capability — those boundary edges are the user's real
+    # cross-capability entry/exit paths and were silently dropped before
+    # (sidira-crawler#14). The target is flagged ``external`` so a consumer can
+    # tell an in-capability hop from a seam-crossing one.
     transitions = [
-        _build_transition(edge, graph)
+        _build_transition(edge, graph, external=edge.to_screen_id not in member_ids)
         for edge in graph.edges.values()
-        if edge.from_screen_id in member_ids and edge.to_screen_id in member_ids
+        if edge.from_screen_id in member_ids
     ]
     return ReverseFigma(screens=screens, transitions=transitions)
 
@@ -91,13 +96,16 @@ def _build_screen(node: ScreenNode, out_edges: list[ScreenEdge], graph: ScreenGr
     )
 
 
-def _build_transition(edge: ScreenEdge, graph: ScreenGraph) -> Transition:
+def _build_transition(
+    edge: ScreenEdge, graph: ScreenGraph, *, external: bool = False
+) -> Transition:
     gated = sorted(edge.roles) if edge.roles != set(graph.roles) else None
     return Transition(
         trigger=edge.trigger,
         from_screen=edge.from_screen_id,
         to_screen=edge.to_screen_id,
         role_gated=gated,
+        external=external,
     )
 
 

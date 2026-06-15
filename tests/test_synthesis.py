@@ -297,16 +297,31 @@ def test_figma_components_from_triggers_and_headings(raw_path):
     assert log.role == "member"
 
 
-def test_figma_transitions_stay_inside_cluster(raw_path):
+def test_figma_keeps_boundary_transitions_marked_external(raw_path):
+    # sidira-crawler#14: edges whose source is in the cluster survive even when
+    # the target landed in another capability — the user's real cross-capability
+    # paths (Home -> Login, Home -> Help) are no longer silently dropped. The
+    # external target is flagged so a consumer can tell a seam-crossing hop from
+    # an in-capability one. Edges *into* the cluster from outside never appear.
     graph = load_raw_jsonl(raw_path)
     cluster = CapabilityCluster(
         name="brew_logging", user_goal="", screen_ids=[HOME, LOG], entry_screen_ids=[HOME]
     )
     figma = synthesize_reverse_figma(cluster, graph)
-    pairs = {(t.from_screen, t.to_screen) for t in figma.transitions}
-    assert pairs == {(HOME, LOG), (LOG, HOME)}
-    gated = next(t for t in figma.transitions if t.to_screen == LOG)
-    assert gated.role_gated == ["member"]
+    by_pair = {(t.from_screen, t.to_screen): t for t in figma.transitions}
+    assert set(by_pair) == {(HOME, LOG), (LOG, HOME), (HOME, LOGIN), (HOME, HELP)}
+    # Every transition originates inside the cluster.
+    assert all(t.from_screen in {HOME, LOG} for t in figma.transitions)
+    # Internal hops are not external.
+    assert by_pair[(HOME, LOG)].external is False
+    assert by_pair[(LOG, HOME)].external is False
+    # Boundary hops point at capabilities the clustering split off.
+    assert by_pair[(HOME, LOGIN)].external is True
+    assert by_pair[(HOME, HELP)].external is True
+    # Role-gating still rides every edge: guest-only Sign In, member-only entry.
+    assert by_pair[(HOME, LOG)].role_gated == ["member"]
+    assert by_pair[(HOME, LOGIN)].role_gated == ["guest"]
+    assert by_pair[(HOME, HELP)].role_gated is None  # seen by both roles
 
 
 # --------------------------------------------------------------------------
