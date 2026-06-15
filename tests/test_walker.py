@@ -12,7 +12,15 @@ from __future__ import annotations
 
 import pytest
 
-from sidira_crawler.walker import SCROLL_HARD_CAP, RawWalk, _scroll_page, _settle, walk
+from sidira_crawler.walker import (
+    SCROLL_HARD_CAP,
+    RawWalk,
+    _execute_action,
+    _goto,
+    _scroll_page,
+    _settle,
+    walk,
+)
 
 pytestmark = pytest.mark.walker
 
@@ -147,6 +155,51 @@ def test_interstitial_chooser(full_walk: RawWalk) -> None:
     ]
     assert onward, "the walk must proceed past the interstitial via its first option"
     assert screens[onward[0].to_screen_id].route == "/members.html"
+
+
+def test_chooser_replay_is_idempotent_when_already_authenticated(
+    fixture_server, browser
+) -> None:
+    """Regression for sidira-crawler#8: replaying a path through a login +
+    profile-chooser interstitial inside an ALREADY-authenticated context must
+    land back on the target, not misclick the chooser step off-target.
+
+    A node behind the login wall records [click -> wall, login -> chooser,
+    choose_first -> target]. The walker restores that node between candidate
+    expansions by replaying the path. But the context is authenticated by then,
+    so members.html does NOT bounce: the login submit is a no-op and the app
+    never shows the profile picker. The replayed choose_first step therefore
+    finds no chooser. The old code blindly clicked candidate index 0 (here a
+    nav link), navigating to '/', failing _state_matches, and abandoning the
+    node (walker.restore_failed) — so every state behind it went undiscovered.
+    The fix skips choose_first when no genuine chooser group is present."""
+    context = browser.new_context()
+    try:
+        # Pre-authenticate exactly as the login + chooser flow would have, so the
+        # target renders directly without the interstitial — the replay context.
+        context.add_cookies(
+            [
+                {"name": "plateful_auth", "value": "1", "url": fixture_server},
+                {"name": "plateful_profile", "value": "alex", "url": fixture_server},
+                {"name": "plateful_consent", "value": "1", "url": fixture_server},
+            ]
+        )
+        page = context.new_page()
+        target = fixture_server + "/members.html"
+
+        # Replay the interstitial tail of the node's path on the authed target.
+        _goto(page, target)
+        _settle(page)
+        _execute_action(page, {"kind": "login"}, FIXTURE_USER, FIXTURE_PASSWORD)
+        _execute_action(page, {"kind": "choose_first"}, FIXTURE_USER, FIXTURE_PASSWORD)
+
+        assert page.url == target, (
+            "replaying login + choose_first in an authenticated context must stay "
+            f"on the target (got {page.url}) — a blind index-0 chooser click "
+            "navigates off-target and abandons the node (#8)"
+        )
+    finally:
+        context.close()
 
 
 # ---------------------------------------------------------------------------
