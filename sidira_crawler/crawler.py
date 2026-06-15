@@ -13,6 +13,7 @@ The flow:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,26 +71,32 @@ def run_crawl(
 
     # ── Walk phase ── walk every capability × role, capturing crashes rather
     # than letting them abort the run, so the gate can report every problem.
-    walks_by_capability: dict[str, dict[str, RawWalk]] = {}
+    # Each walk is fully isolated (own browser + fresh login), so when the
+    # customer opts in (``walk_concurrency`` > 1, #28 lever 2) the cap×role units
+    # run on a bounded thread pool; otherwise they run serially (the default).
+    walks_by_capability: dict[str, dict[str, RawWalk]] = {
+        cap_cfg.name: {} for cap_cfg in config.capabilities
+    }
     crashes: dict[str, str] = {}
-    for cap_cfg in config.capabilities:
-        log.info("crawl.capability.start", capability=cap_cfg.name, roles=cap_cfg.roles)
-        by_role: dict[str, RawWalk] = {}
-        for role in cap_cfg.roles:
-            label = f"{cap_cfg.name}/{role}"
-            try:
-                creds = _credentials_for_role(config, role)
-                by_role[role] = walk_capability(
-                    sandbox_base_url=config.sandbox_base_url,
-                    capability=cap_cfg,
-                    role=role,
-                    user_env=creds.env_var_user,
-                    password_env=creds.env_var_password,
-                )
-            except Exception as exc:  # noqa: BLE001 — any walk failure is a crash signal
-                crashes[label] = f"{type(exc).__name__}: {exc}"
-                log.error("crawl.walk.crash", target=label, error=crashes[label])
-        walks_by_capability[cap_cfg.name] = by_role
+    units = [
+        (cap_cfg, role) for cap_cfg in config.capabilities for role in cap_cfg.roles
+    ]
+    concurrency = max(1, config.walk_concurrency)
+    if concurrency == 1:
+        results = [_walk_unit(config, cap_cfg, role) for cap_cfg, role in units]
+    else:
+        log.info("crawl.parallel.start", workers=concurrency, units=len(units))
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            results = list(
+                pool.map(lambda u: _walk_unit(config, u[0], u[1]), units)
+            )
+    for cap_name, role, walk, crash in results:
+        label = f"{cap_name}/{role}"
+        if crash is not None:
+            crashes[label] = crash
+            log.error("crawl.walk.crash", target=label, error=crash)
+        else:
+            walks_by_capability[cap_name][role] = walk
 
     # ── Honesty gate ── evaluate before building or writing anything.
     verdict = _evaluate_honesty(config, walks_by_capability, crashes)
@@ -247,6 +254,32 @@ def _credentials_for_role(config, role: str):
         if c.role == role:
             return c
     raise KeyError(f"No credentials configured for role {role!r}")
+
+
+def _walk_unit(
+    config: CustomerConfig, cap_cfg: CapabilityConfig, role: str
+) -> tuple[str, str, RawWalk | None, str | None]:
+    """Walk one capability×role unit, capturing any failure as a crash signal.
+
+    Returns ``(capability_name, role, walk_or_None, crash_msg_or_None)``. Pure
+    and side-effect-free apart from the walk itself, so it is safe to run on a
+    worker thread when ``walk_concurrency`` > 1 — each call builds its own
+    Playwright instance + browser inside :func:`walk_capability`, and the
+    walker's only module-level mutable state (the page-keyed pending-request map)
+    is thread-local, so siblings share nothing.
+    """
+    try:
+        creds = _credentials_for_role(config, role)
+        walk = walk_capability(
+            sandbox_base_url=config.sandbox_base_url,
+            capability=cap_cfg,
+            role=role,
+            user_env=creds.env_var_user,
+            password_env=creds.env_var_password,
+        )
+        return cap_cfg.name, role, walk, None
+    except Exception as exc:  # noqa: BLE001 — any walk failure is a crash signal
+        return cap_cfg.name, role, None, f"{type(exc).__name__}: {exc}"
 
 
 def _diff_against_prior(store, customer_id: str, snapshot_version: str, pack: FeaturePack) -> dict:

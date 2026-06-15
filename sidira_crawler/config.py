@@ -40,6 +40,15 @@ class CustomerConfig(BaseModel):
     sandbox_base_url: str
     capabilities: list[CapabilityConfig]
     role_credentials: list[RoleCredential] = Field(default_factory=list)
+    # Opt-in cap×role walk parallelism (sidira-crawler#28 lever 2). Each
+    # capability×role walk is fully isolated (own browser + fresh login), so
+    # they are safe to run on separate threads. Default ``1`` = serial, the only
+    # universally-safe setting: many apps enforce single-session-per-user, so N
+    # concurrent logins of the same role account would invalidate each other's
+    # cookies mid-walk and crash the gate. Raise only for customers whose test
+    # accounts tolerate concurrent sessions. Bounds the thread pool over the
+    # cap×role work units; the determinism re-walk always runs serially.
+    walk_concurrency: int = 1
 
 
 def load_customer_config(path: Path | str) -> CustomerConfig:

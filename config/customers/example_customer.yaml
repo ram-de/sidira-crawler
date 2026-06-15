@@ -1,8 +1,20 @@
 # Example customer config — duplicate this file as <customer_id>.yaml and edit.
 # Real customer files are gitignored.
+#
+# Full-crawl shape (sidira-crawler#28): go WIDE and SHALLOW — all capabilities,
+# both roles, max_hops 2-3. Deeper budgets are both slow and gate-rejected
+# (non-deterministic) on stateful SPAs. See docs/walker.md → "Full-crawl config
+# guidance". Raise max_hops only for a targeted single-capability deep walk.
 
 customer_id: example
 sandbox_base_url: https://sandbox.example.com
+
+# Opt-in cap×role walk parallelism (#28 lever 2). Default 1 = serial, the only
+# universally-safe setting: many apps enforce single-session-per-user, so N
+# concurrent logins of the same role account would self-invalidate mid-walk and
+# crash the no-crash gate. Raise only if the test accounts tolerate concurrent
+# sessions.
+walk_concurrency: 1
 
 capabilities:
   - name: reorder
@@ -13,7 +25,7 @@ capabilities:
       - guest
       - member
       - dashpass_member
-    max_hops: 6
+    max_hops: 3
 
   - name: checkout
     entry_points:
@@ -22,7 +34,7 @@ capabilities:
       - guest
       - member
       - dashpass_member
-    max_hops: 6
+    max_hops: 3
 
 role_credentials:
   - role: guest

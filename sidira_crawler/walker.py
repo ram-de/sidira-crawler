@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import threading
 import weakref
 from collections import deque
 from dataclasses import dataclass, field
@@ -640,7 +641,46 @@ def _eval(page: Page, expression: str, arg: object = None, attempts: int = 3) ->
 
 #: In-flight request tracking per page (see _track_network). Weak keys so
 #: closed pages don't accumulate.
-_PENDING_REQUESTS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+class _ThreadLocalPageMap:
+    """A WeakKeyDictionary-per-thread for page-keyed walk state.
+
+    ``run_crawl`` may walk capability×role units on separate threads when the
+    customer opts into ``walk_concurrency`` > 1 (sidira-crawler#28 lever 2). A
+    walk's pages are created, settled, and dropped entirely on its own thread,
+    but a single module-level ``WeakKeyDictionary`` shared across those threads
+    is **not** thread-safe — its weakref-cleanup machinery can race during a
+    concurrent set/get or finalizer sweep and corrupt the map or raise, even
+    though the page keys are disjoint per thread. Giving each thread its own map
+    removes the sharing outright (no lock, no contention), which is exactly right
+    since nothing is ever read across threads. The surface used by the walker and
+    its tests (``get`` / ``[]`` / ``in``) mirrors the WeakKeyDictionary it
+    replaces.
+    """
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+
+    def _map(self) -> weakref.WeakKeyDictionary:
+        wkd = getattr(self._local, "wkd", None)
+        if wkd is None:
+            wkd = weakref.WeakKeyDictionary()
+            self._local.wkd = wkd
+        return wkd
+
+    def get(self, key, default=None):
+        return self._map().get(key, default)
+
+    def __getitem__(self, key):
+        return self._map()[key]
+
+    def __setitem__(self, key, value) -> None:
+        self._map()[key] = value
+
+    def __contains__(self, key) -> bool:
+        return key in self._map()
+
+
+_PENDING_REQUESTS = _ThreadLocalPageMap()
 
 #: Hard cap on _settle's stability loop (rounds of ~80ms) — the absolute
 #: backstop so a pathological page can never hang the walk.

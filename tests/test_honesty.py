@@ -11,6 +11,8 @@ Two layers:
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from sidira_crawler import crawler
@@ -324,3 +326,122 @@ def test_post_write_pack_failure_leaves_unreachable_orphan(gate_harness, monkeyp
 
     assert len(store.written) == 1  # the pack IS written (the orphan)...
     assert published == []  # ...but `latest` never names it → unreachable
+
+
+# --------------------------------------------------------------------------
+# Opt-in cap×role parallelism (#28 lever 2)
+# --------------------------------------------------------------------------
+
+
+def test_walk_concurrency_defaults_to_serial() -> None:
+    """The safe default is serial — opt-in only. Many apps enforce one session
+    per user, so concurrent logins of the same account would self-invalidate."""
+    assert _config().walk_concurrency == 1
+
+
+def _multi_config(walk_concurrency: int) -> CustomerConfig:
+    """A 3-capability × 2-role config — six walk units to spread across threads."""
+    caps = [
+        CapabilityConfig(
+            name=name,
+            entry_points=[f"https://acme.test/{name}"],
+            roles=["admin", "member"],
+        )
+        for name in ("billing", "reports", "settings")
+    ]
+    return CustomerConfig(
+        customer_id="acme",
+        sandbox_base_url="https://acme.test",
+        capabilities=caps,
+        role_credentials=[
+            RoleCredential(role="admin", env_var_user="U", env_var_password="P"),
+            RoleCredential(role="member", env_var_user="U2", env_var_password="P2"),
+        ],
+        walk_concurrency=walk_concurrency,
+    )
+
+
+@pytest.fixture
+def parallel_harness(monkeypatch):
+    """Like ``gate_harness`` but with a thread-safe walk stub that records every
+    (capability, role) it is asked to walk, so a test can assert the parallel
+    path covers exactly the units a serial walk would — under real threads.
+
+    ``screen_id`` is a pure function of (capability, role), so the determinism
+    re-walk of the first unit reproduces an identical screen set and the gate
+    passes. Returns ``(store, published, seen)``.
+    """
+    store = _RecordingStore()
+    published: list[str] = []
+    lock = threading.Lock()
+    seen: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(crawler, "get_store", lambda: store)
+    monkeypatch.setattr(crawler, "get_client", lambda: object())
+    monkeypatch.setattr(
+        crawler, "publish_latest", lambda *a, **k: published.append(a) or True
+    )
+    monkeypatch.setattr(crawler, "write_diff", lambda *a, **k: None)
+    monkeypatch.setattr(crawler, "graph_from_walks", lambda walks: _FakeGraph())
+    monkeypatch.setattr(crawler, "_declared_cluster", lambda cfg, graph: object())
+    monkeypatch.setattr(crawler, "synthesize_reverse_prd", lambda *a, **k: "prd")
+    monkeypatch.setattr(crawler, "synthesize_reverse_figma", lambda *a, **k: ReverseFigma())
+
+    def fake_walk(*, capability, role, **kwargs):
+        with lock:
+            seen.append((capability.name, role))
+        return RawWalk(
+            capability_name=capability.name,
+            role=role,
+            observations=[_obs(f"/{capability.name}", f"{capability.name}::{role}")],
+        )
+
+    monkeypatch.setattr(crawler, "walk_capability", fake_walk)
+
+    return store, published, seen
+
+
+def test_parallel_walk_covers_every_unit_and_publishes(parallel_harness, monkeypatch) -> None:
+    """With ``walk_concurrency`` > 1 every cap×role unit is still walked exactly
+    once and the gate passes — thread scheduling changes order, not coverage."""
+    store, published, seen = parallel_harness
+    monkeypatch.setattr(crawler, "load_customer_config", lambda _p: _multi_config(4))
+
+    uri = crawler.run_crawl("acme", "2026-W24")
+
+    assert uri == "memory://pack/0"
+    assert len(store.written) == 1
+    assert len(published) == 1
+
+    main_units = {
+        (cap, role)
+        for cap in ("billing", "reports", "settings")
+        for role in ("admin", "member")
+    }
+    assert set(seen) == main_units
+    # Six main units + one determinism re-walk of the first unit (billing/admin).
+    assert len(seen) == len(main_units) + 1
+    assert seen.count(("billing", "admin")) == 2
+
+
+def test_parallel_walk_crash_is_captured_and_blocks_publish(parallel_harness, monkeypatch) -> None:
+    """A crash on a worker thread is captured (not swallowed) and still fails the
+    no-crash gate — crash collection is thread-safe."""
+    store, published, seen = parallel_harness
+    monkeypatch.setattr(crawler, "load_customer_config", lambda _p: _multi_config(4))
+
+    fake_walk = crawler.walk_capability  # the fixture's recording stub
+
+    def crashing(*, capability, role, **kwargs):
+        if (capability.name, role) == ("reports", "member"):
+            raise RuntimeError("parallel nav exploded")
+        return fake_walk(capability=capability, role=role, **kwargs)
+
+    monkeypatch.setattr(crawler, "walk_capability", crashing)
+
+    with pytest.raises(HonestyGateError) as excinfo:
+        crawler.run_crawl("acme", "2026-W24")
+
+    assert "parallel nav exploded" in str(excinfo.value)
+    assert store.written == []
+    assert published == []
