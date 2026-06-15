@@ -41,6 +41,45 @@ chooser after it another. The default of 6 sits comfortably above the longest
 flow the walker must capture today (4 hops), so a missed screen indicates a
 walker failure, never budget exhaustion.
 
+## Full-crawl config guidance — wide-and-shallow (#28)
+
+`max_hops` is a *budget*, not a target: a shallow app naturally exhausts its
+actions well below it. But for a **full multi-capability crawl** the budget you
+configure matters, and profiling against the Streamly sandbox (sidira-crawler#28)
+gives a sharp recommendation:
+
+**Configure all capabilities, both roles, `max_hops: 2–3` — not `≥4`.**
+
+Two independent reasons, and deep depth loses on both:
+
+- **Slow.** Every node is rebuilt from the entry URL by full replay (a fresh
+  browser context per node, for pristine session isolation), so each replayed
+  step re-pays scroll + settle. The cost is `O(nodes × path-length)` and is
+  negligible at shallow depth but explodes deep: a depth-5 single-capability
+  walk took ~380s, of which ~95% was conservative idle-waiting; a wide
+  6-capability × 2-role crawl at depth 3 walked + gated + published in ~6.5 min.
+- **Gate-rejected.** Deep walks of a stateful SPA are *non-deterministic* —
+  three depth-5 runs of the same walk produced 23 / 24 / 25 screens, the
+  variance concentrated entirely in session-state artifacts (my-list contents,
+  accumulated overlay/dialog states). The honesty gate's zero-tolerance
+  determinism re-walk rejects them regardless of speed, so a deep crawl is also
+  *unpublishable*.
+
+Deeper budgets remain valid for a **targeted single-capability** walk where you
+knowingly accept the speed and the determinism risk; they are simply not the
+shape of a routine full crawl.
+
+### Opt-in walk parallelism (`walk_concurrency`)
+
+`run_crawl` walks capability × role serially. Each walk is fully isolated (its
+own browser + fresh login), so setting `walk_concurrency: N` on the customer
+config fans the cap×role units across `N` threads and cuts wide-crawl
+wall-clock. It is **opt-in, default `1`**: many apps enforce
+single-session-per-user, so N concurrent logins of the same role account would
+invalidate each other's cookies mid-walk and crash the no-crash gate. Raise it
+only for customers whose test accounts tolerate concurrent sessions. The
+determinism re-walk always runs serially.
+
 ## Screen identity
 
 A screen is **normalized route + UI-state signature**, formatted
