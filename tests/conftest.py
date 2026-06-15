@@ -21,16 +21,47 @@ FIXTURE_PASSWORD = "sourdough"
 # settle (one that ignores in-flight requests) reliably returns first.
 SLOW_ENDPOINT_SECONDS = 1.5
 
+# GET /longpoll never answers within a test's lifetime: it models the
+# never-idle real-app case (long-poll / SSE / heartbeat) where a request stays
+# in-flight forever, so the page never reaches networkidle and the walker's
+# pending set is never empty. Outlasts _settle's hard cap by a wide margin.
+LONGPOLL_ENDPOINT_SECONDS = 30.0
+
+# GET /chunk answers after a short delay: the slow-render fixture fetches a
+# sequence of these and appends each to the DOM on resolve, so the document
+# keeps growing for ~1s with a request in-flight the whole time. _settle must
+# not cut this short (recall loss) — its stable-despite-pending escape has to
+# outlast a single chunk's latency.
+CHUNK_ENDPOINT_SECONDS = 0.12
+
 
 class _QuietHandler(SimpleHTTPRequestHandler):
     def log_message(self, *args: object) -> None:  # noqa: D102 — silence request logs
         pass
 
-    def do_GET(self) -> None:  # noqa: D102 — adds one slow API endpoint
-        if self.path.startswith("/slow"):
+    def do_GET(self) -> None:  # noqa: D102 — adds slow / never-idle API endpoints
+        # Match on the path without its query string and compare exactly, so an
+        # API route never shadows a static file that merely shares its prefix
+        # (e.g. /slow must not swallow a navigation to /slowrender.html).
+        route = self.path.split("?", 1)[0]
+        if route == "/slow":
             time.sleep(SLOW_ENDPOINT_SECONDS)
             self.send_response(204)
             self.end_headers()
+            return
+        if route == "/longpoll":
+            time.sleep(LONGPOLL_ENDPOINT_SECONDS)
+            self.send_response(204)
+            self.end_headers()
+            return
+        if route == "/chunk":
+            time.sleep(CHUNK_ENDPOINT_SECONDS)
+            body = b"ingredient"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         super().do_GET()
 

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful — Slow shelf</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <nav>
+    <a class="nav-link" href="/" data-testid="nav-home">Home</a>
+  </nav>
+</header>
+<main>
+  <h1>Restocking the shelf</h1>
+  <!-- Hostile trait: slow incremental render. Content arrives in chunks over
+       ~1s, each fetched from a slow endpoint and appended on resolve, so a
+       request is in-flight the whole time the DOM is still growing. A settle
+       that gives up too early (or treats the in-flight chunk fetch as
+       ignorable background chatter too soon) returns mid-render and loses the
+       tail of the list — recall loss. _settle must keep waiting while the DOM
+       is still changing and only return once it has truly stabilised. -->
+  <p data-testid="shelf-loading">Restocking…</p>
+  <ul data-testid="shelf-items"></ul>
+</main>
+<script src="/consent.js"></script>
+<script>
+(function () {
+  var TOTAL = 8;
+  var list = document.querySelector('[data-testid="shelf-items"]');
+  function loadChunk(i) {
+    if (i >= TOTAL) {
+      var done = document.createElement('p');
+      done.setAttribute('data-testid', 'shelf-restocked');
+      done.textContent = 'Shelf fully restocked.';
+      document.querySelector('main').appendChild(done);
+      return;
+    }
+    // Each chunk is a real in-flight fetch; the DOM grows only when it
+    // resolves, so the page is "stable but pending" between chunks.
+    fetch('/chunk?i=' + i).then(function () {
+      var li = document.createElement('li');
+      li.setAttribute('data-testid', 'shelf-item-' + i);
+      li.textContent = 'Restocked item ' + (i + 1);
+      list.appendChild(li);
+      loadChunk(i + 1);
+    });
+  }
+  loadChunk(0);
+})();
+</script>
+</body>
+</html>
