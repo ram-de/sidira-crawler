@@ -138,9 +138,18 @@ def run_crawl(
     )
 
     store = get_store()
-    uri = store.write_pack(pack)
 
+    # ── Atomicity (#22) ── `publish_latest` is the SOLE visibility-making write and
+    # runs LAST: the simulator only ever resolves the `latest` pointer. Compute the
+    # diff (the one step that can read the prior snapshot and fail) BEFORE
+    # `write_pack`, so a diff failure writes no pack at all. After `write_pack` the
+    # only ops are the diff write and the pointer flip; a failure in either leaves an
+    # orphan snapshot that `latest` never names — provably unreachable, so "a crawl
+    # that doesn't finish publishes nothing" still holds. (Eliminating the orphan
+    # outright — stage→promote, or cleanup-on-delete — needs a store move/delete
+    # primitive; deferred, see issue #22.)
     diff = _diff_against_prior(store, customer_id, snapshot_version, pack)
+    uri = store.write_pack(pack)
     write_diff(store, customer_id, snapshot_version, diff)
     publish_latest(store, customer_id, snapshot_version)
 

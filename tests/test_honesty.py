@@ -278,3 +278,49 @@ def test_determinism_drift_blocks_publish(gate_harness) -> None:
     assert "DRIFT" in str(excinfo.value)
     assert store.written == []
     assert published == []
+
+
+def test_diff_failure_writes_no_pack(gate_harness, monkeypatch) -> None:
+    """The diff is computed BEFORE write_pack (#22 reorder), so a diff failure
+    leaves no pack at all — not even an unreachable orphan."""
+    walk_results, store, published = gate_harness
+    walk = RawWalk(
+        capability_name="billing",
+        role="admin",
+        observations=[_obs("/billing", "billing::s1")],
+    )
+    walk_results.extend([walk, walk])
+
+    def boom(*a, **k):
+        raise RuntimeError("prior snapshot unreadable")
+
+    monkeypatch.setattr(crawler, "_diff_against_prior", boom)
+
+    with pytest.raises(RuntimeError, match="prior snapshot"):
+        crawler.run_crawl("acme", "2026-W24")
+
+    assert store.written == []  # diff failed before write_pack → nothing written
+    assert published == []
+
+
+def test_post_write_pack_failure_leaves_unreachable_orphan(gate_harness, monkeypatch) -> None:
+    """A failure AFTER write_pack (here the diff write) leaves the pack on disk
+    but `latest` never flipped — the orphan is provably unreachable (#22)."""
+    walk_results, store, published = gate_harness
+    walk = RawWalk(
+        capability_name="billing",
+        role="admin",
+        observations=[_obs("/billing", "billing::s1")],
+    )
+    walk_results.extend([walk, walk])
+
+    def boom(*a, **k):
+        raise RuntimeError("diff write failed")
+
+    monkeypatch.setattr(crawler, "write_diff", boom)
+
+    with pytest.raises(RuntimeError, match="diff write failed"):
+        crawler.run_crawl("acme", "2026-W24")
+
+    assert len(store.written) == 1  # the pack IS written (the orphan)...
+    assert published == []  # ...but `latest` never names it → unreachable
