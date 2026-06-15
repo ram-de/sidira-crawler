@@ -10,15 +10,20 @@ transient toast.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from sidira_crawler.walker import (
+    _PENDING_REQUESTS,
+    _SETTLE_STABLE_DESPITE_PENDING_ROUNDS,
     SCROLL_HARD_CAP,
     RawWalk,
     _execute_action,
     _goto,
     _scroll_page,
     _settle,
+    _track_network,
     walk,
 )
 
@@ -338,6 +343,76 @@ def test_feed_scroll_terminates_by_structure(fixture_server, browser) -> None:
         assert page.locator("[data-testid=feed-finished]").is_visible()
     finally:
         context.close()
+
+
+# ---------------------------------------------------------------------------
+# Settle on never-idle vs slow-render pages (#28)
+# ---------------------------------------------------------------------------
+
+
+def _consented_page(fixture_server, browser):
+    context = browser.new_context()
+    context.add_cookies([{"name": "plateful_consent", "value": "1", "url": fixture_server}])
+    return context, context.new_page()
+
+
+def test_settle_fast_on_never_idle_page(fixture_server, browser) -> None:
+    """A page whose content stabilises instantly but holds a long-poll open
+    forever must NOT cost the full round budget. The old settle keyed solely on
+    an empty pending set, so a never-idle page (long-poll / SSE / heartbeat —
+    most real apps) burned every round on every call. _settle now returns on a
+    DOM that is byte-stable despite the in-flight request, bounded well under
+    the old worst case."""
+    context, page = _consented_page(fixture_server, browser)
+    try:
+        # Attach request tracking before navigating, exactly as _goto does, so
+        # the long-poll fired on load is counted (settle's own _track_network
+        # would otherwise miss a request that started before it ran).
+        _track_network(page)
+        page.goto(fixture_server + "/neveridle.html")
+        start = time.monotonic()
+        _settle(page)
+        elapsed = time.monotonic() - start
+
+        # The fixture really is never-idle: the long-poll is still in flight at
+        # return, so settle could only have come back via the stable-despite-
+        # pending path — not the empty-pending fast path.
+        assert _PENDING_REQUESTS.get(page), "the long-poll request must still be pending"
+        # Bounded: ~_SETTLE_STABLE_DESPITE_PENDING_ROUNDS rounds (~3.0s), far
+        # under the old ~6.8s (2s networkidle + 60×80ms). Generous ceiling to
+        # stay non-flaky on a loaded CI box.
+        assert elapsed < 4.5, f"never-idle settle took {elapsed:.2f}s — budget not bounded"
+        # The content that DID render is intact.
+        assert page.locator("[data-testid=shelf-ready]").is_visible()
+    finally:
+        context.close()
+
+
+def test_settle_preserves_slow_render_recall(fixture_server, browser) -> None:
+    """A page that streams its content in over ~1s (a chunk fetch in flight the
+    whole time) must settle only once the DOM stops growing — never mid-render.
+    This is the recall guardrail on the stable-despite-pending threshold: were
+    it shorter than a chunk's latency, the tail of the list would be lost."""
+    context, page = _consented_page(fixture_server, browser)
+    try:
+        page.goto(fixture_server + "/slowrender.html")
+        _settle(page)
+        # Every streamed item is present and the terminal marker rendered: the
+        # settle waited out the full incremental render.
+        assert page.locator("[data-testid=shelf-restocked]").is_visible(), (
+            "settle returned before the slow render finished — recall loss"
+        )
+        items = page.locator("[data-testid=shelf-items] li").count()
+        assert items == 8, f"expected all 8 streamed items, got {items}"
+    finally:
+        context.close()
+
+
+# Guards the tuning rationale: the threshold must outlast the slowest
+# DOM-affecting fetch in the fixture app (the 1.5s deferred sync click), so the
+# despite-pending escape can't fire before such an effect lands.
+def test_despite_pending_threshold_outlasts_slowest_fetch() -> None:
+    assert _SETTLE_STABLE_DESPITE_PENDING_ROUNDS * 0.08 > 1.5
 
 
 # ---------------------------------------------------------------------------

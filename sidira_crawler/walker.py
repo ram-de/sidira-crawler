@@ -642,10 +642,30 @@ def _eval(page: Page, expression: str, arg: object = None, attempts: int = 3) ->
 #: closed pages don't accumulate.
 _PENDING_REQUESTS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
-#: Hard cap on _settle's stability loop (rounds of ~80ms). Generous enough to
-#: outlast realistic in-app fetch chains, small enough to terminate on
-#: pathological never-ending connections (long-poll, SSE).
+#: Hard cap on _settle's stability loop (rounds of ~80ms) — the absolute
+#: backstop so a pathological page can never hang the walk.
 _SETTLE_MAX_ROUNDS = 60
+
+#: Rounds of byte-stable DOM after which _settle returns even with requests
+#: still in flight (#28). Below this, a stable-but-pending DOM keeps waiting —
+#: the pending request might be a slow fetch about to mutate the page. At or
+#: above it, the pending request is treated as never-idle background chatter
+#: (long-poll / SSE / heartbeat beacon) and the page is considered settled.
+#:
+#: This is a deliberate, bounded speed/recall tradeoff (the one #28 calls out:
+#: "any cap change is a speed/recall tradeoff and must be proven against the
+#: slow path"). The old loop had no such escape, so it effectively waited the
+#: full _SETTLE_MAX_ROUNDS (~4.8s) for a pending request to clear; this returns
+#: at ~3.0s instead. The residual cost: a DOM-affecting fetch that holds the
+#: innerHTML byte-identical for 3.0–4.8s and *then* injects content is now
+#: captured before that content lands. That shape is rare in practice — a real
+#: loading state (spinner, skeleton, "Loading…") mutates innerHTML length and
+#: so resets this counter, keeping the wait alive; only a fetch that freezes
+#: the DOM completely for >3s hits it. 3.0s leaves 2× margin over every
+#: DOM-affecting fetch in the fixture app (the deferred click effect is 1.5s),
+#: which the slow-render fixture proves; raise this knob if a real target is
+#: found to render past it. _SETTLE_MAX_ROUNDS stays the absolute backstop.
+_SETTLE_STABLE_DESPITE_PENDING_ROUNDS = 38
 
 
 def _track_network(page: Page) -> set:
@@ -679,27 +699,50 @@ def _track_network(page: Page) -> set:
 
 
 def _settle(page: Page) -> None:
-    """Wait for client render: load states, tracked network quiescence, and a
-    DOM-stability heuristic. Bounded — never waits forever."""
+    """Wait for client render: load state, tracked network quiescence, and a
+    DOM-stability heuristic. Bounded — never waits forever.
+
+    Two return signals, because "network quiet" and "DOM stable" are different
+    questions that a single round budget used to conflate (#28). The fast path
+    is a DOM byte-stable for two rounds *with no requests in flight* — genuinely
+    settled, returns in ~160ms. But a never-idle app (long-poll / SSE /
+    heartbeat) keeps a request in flight forever, so that path never fires and
+    the old code burned the whole budget on every settle. The second signal
+    covers it: a DOM byte-stable for ``_SETTLE_STABLE_DESPITE_PENDING_ROUNDS``
+    rounds is treated as settled even with requests pending — those are
+    background chatter, not render. That threshold is a deliberate, bounded
+    speed/recall tradeoff (see its definition): it outlasts every DOM-affecting
+    fetch the fixtures exercise, but a fetch that freezes the DOM beyond it is
+    captured early. ``_SETTLE_MAX_ROUNDS`` remains the absolute backstop.
+
+    The explicit ``networkidle`` wait the old code ran here is gone: it is
+    redundant with the pending-tracking loop below (request listeners attach
+    before navigation, so the initial load burst is already counted), and on a
+    never-idle page it only ever burned its full timeout.
+    """
     pending = _track_network(page)
     try:
         page.wait_for_load_state("load", timeout=5000)
     except Error:
         pass
-    try:
-        page.wait_for_load_state("networkidle", timeout=2000)
-    except Error:
-        pass
     last = -1
-    stable = 0
+    stable_idle = 0
+    stable_dom = 0
     for _ in range(_SETTLE_MAX_ROUNDS):
         size = _eval(page, "() => document.body ? document.body.innerHTML.length : -1", attempts=1)
-        if not pending and size is not None and size == last and size >= 0:
-            stable += 1
-            if stable >= 2:
+        if size is not None and size >= 0 and size == last:
+            stable_dom += 1
+            if pending:
+                stable_idle = 0
+            else:
+                stable_idle += 1
+                if stable_idle >= 2:
+                    return
+            if stable_dom >= _SETTLE_STABLE_DESPITE_PENDING_ROUNDS:
                 return
         else:
-            stable = 0
+            stable_idle = 0
+            stable_dom = 0
         last = size if size is not None else -1
         page.wait_for_timeout(80)
 

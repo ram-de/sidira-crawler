@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plateful — Live shelf</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <nav>
+    <a class="nav-link" href="/" data-testid="nav-home">Home</a>
+  </nav>
+</header>
+<main>
+  <h1>Live community shelf</h1>
+  <!-- Hostile trait: never-idle network. The DOM below is fully rendered on
+       load and never changes again, but the page opens a long-poll that stays
+       in-flight for the life of the page (modelling SSE / heartbeat polling
+       that most real apps run). The page therefore never reaches networkidle
+       and the walker's pending set is never empty. A settle keyed only on
+       "no pending requests" would burn its entire round budget here even
+       though the content stabilised instantly. -->
+  <p data-testid="shelf-ready">The shelf is loaded. Live updates stream in the background.</p>
+  <ul>
+    <li>Sourdough starter</li>
+    <li>Heirloom tomatoes</li>
+    <li>Aged parmesan</li>
+  </ul>
+</main>
+<script src="/consent.js"></script>
+<script>
+(function () {
+  // A request that never resolves within a walk: keeps the network non-idle
+  // and the pending set non-empty forever. Deliberately not awaited.
+  fetch('/longpoll').catch(function () {});
+})();
+</script>
+</body>
+</html>
