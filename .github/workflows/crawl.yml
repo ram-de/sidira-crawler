@@ -71,7 +71,13 @@ permissions:
 jobs:
   walk:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30m fits the localhost mock walk, but the production path walks a LIVE
+    # target over the network (and runs gate+synthesize+publish in this same
+    # job, since `synthesize` is skipped in production). A real walk's per-page
+    # latency pushed the first production crawl past 30m mid-walk, so it never
+    # reached publish. 75m gives real-target walks headroom. See the executor
+    # scaling note in ram-de/sidira-crawler#25.
+    timeout-minutes: 75
     outputs:
       crawl_date: ${{ steps.date.outputs.crawl_date }}
       mode: ${{ steps.mode.outputs.mode }}
