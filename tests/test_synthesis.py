@@ -334,9 +334,19 @@ def test_prd_evidence_includes_screens_and_exits(raw_path):
 # --------------------------------------------------------------------------
 
 
+_DOMAIN_JSON = {
+    "domains": [
+        {"label": "Brewing", "capabilities": ["brew_logging"]},
+        {"label": "Account & access", "capabilities": ["authentication"]},
+    ]
+}
+
+
 def test_synthesize_pack_end_to_end(raw_path, tmp_path):
     graph = load_raw_jsonl(raw_path)
-    llm = FakeLLM([json.dumps(CLUSTER_JSON), "# PRD brew", "# PRD auth"])
+    # Queue order: cluster screens→caps, then cluster caps→domains, then one PRD
+    # per capability.
+    llm = FakeLLM([json.dumps(CLUSTER_JSON), json.dumps(_DOMAIN_JSON), "# PRD brew", "# PRD auth"])
     pack = synthesize_pack(graph, llm, customer_id="brewlog", snapshot_version="2026-W24")
 
     assert isinstance(pack, FeaturePack)
@@ -349,6 +359,26 @@ def test_synthesize_pack_end_to_end(raw_path, tmp_path):
     assert brew.roles == ["guest", "member"]
     assert brew.implicit_metric == "entries per week"
     assert brew.reverse_prd == "# PRD brew"
+    # Second-level grouping lands on each capability (#18) and is persisted in
+    # the manifest (the artifact-store home consumers read in one shot).
+    assert brew.domain == "Brewing"
+    assert pack.capabilities[1].domain == "Account & access"
+    assert pack.manifest.capability_domains == {
+        "brew_logging": "Brewing",
+        "authentication": "Account & access",
+    }
+
+
+def test_synthesize_pack_degrades_to_no_domain(raw_path, tmp_path):
+    # A broken domain response must not fail the pack: capabilities are emitted
+    # ungrouped (domain=None) and PRD synthesis still runs against the rest of
+    # the queue.
+    graph = load_raw_jsonl(raw_path)
+    llm = FakeLLM([json.dumps(CLUSTER_JSON), "not json", "still not json", "# PRD brew", "# PRD auth"])
+    pack = synthesize_pack(graph, llm, customer_id="brewlog", snapshot_version="2026-W24")
+    assert [c.domain for c in pack.capabilities] == [None, None]
+    assert pack.manifest.capability_domains == {}
+    assert pack.capabilities[0].reverse_prd == "# PRD brew"
 
     store = LocalArtifactStore(tmp_path / "out")
     written = Path(store.write_pack(pack))

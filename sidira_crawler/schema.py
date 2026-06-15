@@ -65,6 +65,11 @@ class Capability(BaseModel):
     reverse_prd: str
     reverse_figma: ReverseFigma
     implicit_metric: str | None = None
+    #: Higher-level grouping label (capability → domain), synthesized by the
+    #: second-level clustering pass. Optional and back-compatible: packs
+    #: predating crawler #18 (and any pack whose domain pass degraded) omit it,
+    #: and the consumer buckets a domainless capability as "Ungrouped".
+    domain: str | None = None
 
 
 class FeaturePackManifest(BaseModel):
@@ -75,6 +80,13 @@ class FeaturePackManifest(BaseModel):
     generated_at: datetime
     schema_version: Literal["1.0"] = "1.0"
     capabilities: list[str]
+    #: Persisted index for the second-level grouping (capability name → domain).
+    #: This is the artifact-store home for `Capability.domain` — per-capability
+    #: files carry only the reverse-PRD/Figma, so the manifest is the only place
+    #: a consumer can read grouping in a single read. Optional and back-compat:
+    #: empty for packs predating crawler #18 or whose domain pass degraded; a
+    #: capability absent from the map falls back to "Ungrouped".
+    capability_domains: dict[str, str] = Field(default_factory=dict)
     crawl_metadata: dict[str, str] = Field(default_factory=dict)
 
 

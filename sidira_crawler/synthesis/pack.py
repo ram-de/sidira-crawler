@@ -22,6 +22,7 @@ from sidira_crawler.synthesis.cluster import (
     ClusterResult,
     synthesize_clusters,
 )
+from sidira_crawler.synthesis.domains import CapabilityBrief, synthesize_domains
 from sidira_crawler.synthesis.figma import synthesize_reverse_figma
 from sidira_crawler.synthesis.graph import ScreenGraph
 from sidira_crawler.synthesis.prd import synthesize_reverse_prd
@@ -50,8 +51,25 @@ def synthesize_pack(
         unassigned=len(clusters.unassigned_screen_ids),
     )
 
+    # Second-level clustering: group capabilities into domains (#18). Runs
+    # before the per-capability artifacts so each one carries its domain; a
+    # best-effort failure leaves every capability ungrouped.
+    domain_map = synthesize_domains(
+        [
+            CapabilityBrief(
+                name=cluster.name,
+                goal=cluster.user_goal,
+                surfaces=sorted({graph.screens[sid].route for sid in cluster.screen_ids}),
+            )
+            for cluster in clusters.capabilities
+        ],
+        llm,
+    )
+    log.info("synthesis.domains", domains=sorted(set(domain_map.values())))
+
     capabilities = [
-        _synthesize_capability(cluster, graph, llm) for cluster in clusters.capabilities
+        _synthesize_capability(cluster, graph, llm, domain=domain_map.get(cluster.name))
+        for cluster in clusters.capabilities
     ]
 
     manifest = FeaturePackManifest(
@@ -59,13 +77,17 @@ def synthesize_pack(
         snapshot_version=snapshot_version,
         generated_at=datetime.now(timezone.utc),
         capabilities=[c.name for c in capabilities],
+        capability_domains={c.name: c.domain for c in capabilities if c.domain},
         crawl_metadata=_crawl_metadata(graph, clusters),
     )
     return FeaturePack(manifest=manifest, capabilities=capabilities)
 
 
 def _synthesize_capability(
-    cluster: CapabilityCluster, graph: ScreenGraph, llm: LLMClient
+    cluster: CapabilityCluster,
+    graph: ScreenGraph,
+    llm: LLMClient,
+    domain: str | None = None,
 ) -> Capability:
     log.info("synthesis.capability.start", capability=cluster.name, screens=len(cluster.screen_ids))
     reverse_figma = synthesize_reverse_figma(cluster, graph)
@@ -79,6 +101,7 @@ def _synthesize_capability(
         reverse_prd=reverse_prd,
         reverse_figma=reverse_figma,
         implicit_metric=cluster.implicit_metric,
+        domain=domain,
     )
 
 

@@ -31,6 +31,7 @@ from sidira_crawler.llm import get_client
 from sidira_crawler.schema import Capability, FeaturePack, FeaturePackManifest
 from sidira_crawler.storage import get_store, publish_latest, write_diff
 from sidira_crawler.synthesis.cluster import CapabilityCluster
+from sidira_crawler.synthesis.domains import CapabilityBrief, synthesize_domains
 from sidira_crawler.synthesis.figma import synthesize_reverse_figma
 from sidira_crawler.synthesis.graph import ScreenGraph, graph_from_walks
 from sidira_crawler.synthesis.prd import synthesize_reverse_prd
@@ -114,12 +115,24 @@ def run_crawl(
             )
         )
 
+    # Second-level clustering: group capabilities into domains (#18). Best-effort
+    # and non-blocking — a failure (or the bare LLM stub used by the gate tests)
+    # leaves every capability ungrouped rather than failing a gated crawl.
+    domain_map = synthesize_domains(
+        [CapabilityBrief(name=c.name, surfaces=c.surfaces) for c in capabilities], llm
+    )
+    if domain_map:
+        capabilities = [
+            c.model_copy(update={"domain": domain_map.get(c.name)}) for c in capabilities
+        ]
+
     pack = FeaturePack(
         manifest=FeaturePackManifest(
             customer_id=customer_id,
             snapshot_version=snapshot_version,
             generated_at=datetime.now(timezone.utc),
             capabilities=[c.name for c in capabilities],
+            capability_domains={c.name: c.domain for c in capabilities if c.domain},
         ),
         capabilities=capabilities,
     )
