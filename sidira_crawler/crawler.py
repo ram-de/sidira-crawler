@@ -264,8 +264,9 @@ def _walk_unit(
     Returns ``(capability_name, role, walk_or_None, crash_msg_or_None)``. Pure
     and side-effect-free apart from the walk itself, so it is safe to run on a
     worker thread when ``walk_concurrency`` > 1 — each call builds its own
-    Playwright instance + browser inside :func:`walk_capability` and shares no
-    state with its siblings.
+    Playwright instance + browser inside :func:`walk_capability`, and the
+    walker's only module-level mutable state (the page-keyed pending-request map)
+    is thread-local, so siblings share nothing.
     """
     try:
         creds = _credentials_for_role(config, role)
