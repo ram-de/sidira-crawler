@@ -31,12 +31,22 @@ class Component(BaseModel):
 
 
 class Transition(BaseModel):
-    """An observed transition from one screen to another."""
+    """An observed transition from one screen to another.
+
+    ``external`` marks a boundary edge: the source screen is inside this
+    capability's cluster but the target landed in a *different* capability (or
+    stayed unassigned). Clustering splits a product into capabilities, but the
+    user's observed entry/exit paths cross those seams — keeping boundary edges
+    (source-in-cluster) instead of dropping them preserves those real
+    cross-capability flows. ``to_screen`` still names the external target so a
+    consumer can resolve which capability it belongs to. (sidira-crawler#14)
+    """
 
     trigger: str
     from_screen: str
     to_screen: str
     role_gated: list[str] | None = None
+    external: bool = False
 
 
 class Screen(BaseModel):
