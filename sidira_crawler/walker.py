@@ -853,10 +853,18 @@ def _execute_action(page: Page, action: dict, username: str | None, password: st
     elif kind == "login":
         _eval(page, _JS_LOGIN, [username or "", password or ""])
     elif kind == "choose_first":
+        # Replaying a chooser step must be idempotent. In an already-authenticated
+        # context the app skips the profile/account picker that produced this step
+        # and lands straight on the target, so no chooser is present on replay.
+        # A blind index-0 fallback would then click an unrelated element (e.g. a
+        # nav link), navigate off the target, and abandon the node
+        # (walker.restore_failed — sidira-crawler#8). Click only a genuine chooser
+        # group; otherwise the precondition is gone, so skip the step.
         data = _eval(page, _JS_CAPTURE)
         cands = _eval(page, _JS_CANDIDATES, False) or []
         idxs = _chooser_group(cands, data["copy_len"]) if data else None
-        _eval(page, _JS_CLICK, {"index": idxs[0] if idxs else 0, "dialog": False})
+        if idxs is not None:
+            _eval(page, _JS_CLICK, {"index": idxs[0], "dialog": False})
     elif kind == "scroll":
         _scroll_page(page)
     elif kind == "click":
