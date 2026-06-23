@@ -21,10 +21,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from sidira_crawler.config import CapabilityConfig, CustomerConfig, RoleCredential
 
 CREDENTIALS_ENV = "SIDIRA_CRAWL_CREDENTIALS"
+
+# A crawl setup id (``product_id``) becomes a path segment in the R2 key
+# ``customers/<id>/setups/<product_id>/featurepacks/...``. Constrain it to a safe
+# slug — lowercase alphanumerics plus ``-``/``_``, bounded length — so it can
+# never inject a path separator (``/``), traverse (``..``), or smuggle
+# whitespace into an object key. ``"default"`` is the legacy single-setup value.
+_PRODUCT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def build_customer_config(payload: dict, customer_id: str) -> CustomerConfig:
@@ -38,6 +46,17 @@ def build_customer_config(payload: dict, customer_id: str) -> CustomerConfig:
     sandbox_url = (payload.get("sandbox_url") or "").strip()
     if not sandbox_url:
         raise ValueError("dispatch config_json is missing sandbox_url")
+
+    # Which crawl setup this org dispatched (sidira-simulator #215/#245). Absent
+    # or empty → "default" (the legacy single-setup org, byte-identical R2 path).
+    # Validate as a safe R2-key slug so it can never escape the key.
+    product_id = (payload.get("product_id") or "default").strip()
+    if not _PRODUCT_ID_RE.match(product_id):
+        raise ValueError(
+            "dispatch config_json has an invalid product_id "
+            f"{product_id!r} — must be a lowercase slug "
+            "([a-z0-9][a-z0-9_-]{0,63}); no '/', '..', or spaces"
+        )
 
     roles = list(payload.get("roles") or [])
     if not roles:
@@ -76,6 +95,7 @@ def build_customer_config(payload: dict, customer_id: str) -> CustomerConfig:
     return CustomerConfig(
         customer_id=customer_id,
         sandbox_base_url=sandbox_url,
+        product_id=product_id,
         capabilities=capabilities,
         role_credentials=role_credentials,
     )

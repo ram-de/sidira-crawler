@@ -9,6 +9,11 @@ Layout:
         diff-vs-prior.json
     customers/<customer_id>/featurepacks/latest   ← pointer, contents = snapshot_version
 
+A non-default crawl setup (sidira-simulator #215/#245) writes the same tree
+under a per-setup prefix instead — ``customers/<customer_id>/setups/<product_id>/
+featurepacks/...`` — so two setups of one org never collide. See
+:func:`featurepacks_prefix`, the single source of truth shared with the reader.
+
 The ``latest`` pointer is what downstream consumers (the simulator's
 FeaturePackLoader) resolve before reading a pack. Writing it is the publish
 step: call ``publish_latest`` only after every snapshot artifact (pack AND
@@ -29,6 +34,28 @@ from sidira_crawler.schema import FeaturePack
 log = structlog.get_logger()
 
 
+def featurepacks_prefix(customer_id: str, product_id: str = "default") -> str:
+    """The R2/local key prefix (no trailing slash) for a customer's Feature Packs.
+
+    This is the single source of truth for the pack path, shared by the writer
+    (this module) and — by contract — the simulator's ``FeaturePackLoader``
+    reader (sidira-simulator #215/#245):
+
+    * ``product_id == "default"`` → ``customers/<id>/featurepacks`` — the legacy
+      single-setup path, **byte-identical** to pre-multi-setup behavior, so the
+      live Founders org's pack is untouched.
+    * any other ``product_id`` → ``customers/<id>/setups/<product_id>/featurepacks``
+      so two crawl setups of one org never collide.
+
+    Every path-building site in this module routes through here, which is what
+    keeps a named setup's ``latest`` pointer (and its publish/skip-regression
+    logic) independent of the default setup's pointer.
+    """
+    if product_id == "default":
+        return f"customers/{customer_id}/featurepacks"
+    return f"customers/{customer_id}/setups/{product_id}/featurepacks"
+
+
 class ArtifactStore(Protocol):
     def write_pack(self, pack: FeaturePack) -> str: ...
 
@@ -40,13 +67,8 @@ class LocalArtifactStore:
         self.root = Path(root)
 
     def write_pack(self, pack: FeaturePack) -> str:
-        base = (
-            self.root
-            / "customers"
-            / pack.manifest.customer_id
-            / "featurepacks"
-            / pack.manifest.snapshot_version
-        )
+        prefix = featurepacks_prefix(pack.manifest.customer_id, pack.manifest.product_id)
+        base = self.root / prefix / pack.manifest.snapshot_version
         base.mkdir(parents=True, exist_ok=True)
         (base / "manifest.json").write_text(pack.manifest.model_dump_json(indent=2))
         caps_dir = base / "capabilities"
@@ -74,10 +96,8 @@ class R2ArtifactStore:
         )
 
     def write_pack(self, pack: FeaturePack) -> str:
-        base_key = (
-            f"customers/{pack.manifest.customer_id}"
-            f"/featurepacks/{pack.manifest.snapshot_version}"
-        )
+        prefix = featurepacks_prefix(pack.manifest.customer_id, pack.manifest.product_id)
+        base_key = f"{prefix}/{pack.manifest.snapshot_version}"
         self._put(f"{base_key}/manifest.json", pack.manifest.model_dump_json(indent=2))
         for cap in pack.capabilities:
             self._put(f"{base_key}/capabilities/{cap.name}/reverse-prd.md", cap.reverse_prd)
@@ -99,8 +119,18 @@ def get_store() -> ArtifactStore:
     return LocalArtifactStore(local_root)
 
 
-def publish_latest(store: ArtifactStore, customer_id: str, snapshot_version: str) -> bool:
-    """Point ``customers/<id>/featurepacks/latest`` at a fully written snapshot.
+def publish_latest(
+    store: ArtifactStore,
+    customer_id: str,
+    snapshot_version: str,
+    product_id: str = "default",
+) -> bool:
+    """Point ``<prefix>/latest`` at a fully written snapshot.
+
+    The prefix is per-setup (see :func:`featurepacks_prefix`): a named setup's
+    pointer lives under ``customers/<id>/setups/<product_id>/featurepacks/latest``
+    and is never read or overwritten by the default setup (or any sibling), so
+    the publish/skip-regression logic below is fully per-setup.
 
     This is the publish step — consumers resolve the pointer before reading,
     so call it only after every snapshot artifact (pack and diff) is written.
@@ -110,31 +140,34 @@ def publish_latest(store: ArtifactStore, customer_id: str, snapshot_version: str
     skipped. Weekly buckets are zero-padded (``2026-W04``), so plain string
     order is chronological. Returns True when the pointer was updated.
     """
-    current = _read_latest(store, customer_id)
+    prefix = featurepacks_prefix(customer_id, product_id)
+    current = _read_latest(store, customer_id, product_id)
     if current is not None and current > snapshot_version:
         log.info(
             "publish.latest.skipped",
             customer_id=customer_id,
+            product_id=product_id,
             current=current,
             snapshot=snapshot_version,
         )
         return False
     if isinstance(store, LocalArtifactStore):
-        path = store.root / "customers" / customer_id / "featurepacks" / "latest"
+        path = store.root / prefix / "latest"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(snapshot_version)
     elif isinstance(store, R2ArtifactStore):
-        store._put(f"customers/{customer_id}/featurepacks/latest", snapshot_version)
+        store._put(f"{prefix}/latest", snapshot_version)
     return True
 
 
-def _read_latest(store: ArtifactStore, customer_id: str) -> str | None:
+def _read_latest(store: ArtifactStore, customer_id: str, product_id: str = "default") -> str | None:
     """Read the current latest pointer, or None if it has never been published."""
+    prefix = featurepacks_prefix(customer_id, product_id)
     if isinstance(store, LocalArtifactStore):
-        path = store.root / "customers" / customer_id / "featurepacks" / "latest"
+        path = store.root / prefix / "latest"
         return path.read_text().strip() if path.exists() else None
     if isinstance(store, R2ArtifactStore):
-        key = f"customers/{customer_id}/featurepacks/latest"
+        key = f"{prefix}/latest"
         try:
             obj = store._s3.get_object(Bucket=store._bucket, Key=key)
         except store._s3.exceptions.NoSuchKey:
@@ -148,18 +181,13 @@ def write_diff(
     customer_id: str,
     snapshot_version: str,
     diff: dict,
+    product_id: str = "default",
 ) -> None:
     """Write the diff-vs-prior snapshot summary alongside the pack."""
+    prefix = featurepacks_prefix(customer_id, product_id)
     if isinstance(store, LocalArtifactStore):
-        out = (
-            store.root
-            / "customers"
-            / customer_id
-            / "featurepacks"
-            / snapshot_version
-            / "diff-vs-prior.json"
-        )
+        out = store.root / prefix / snapshot_version / "diff-vs-prior.json"
         out.write_text(json.dumps(diff, indent=2))
     elif isinstance(store, R2ArtifactStore):
-        key = f"customers/{customer_id}/featurepacks/{snapshot_version}/diff-vs-prior.json"
+        key = f"{prefix}/{snapshot_version}/diff-vs-prior.json"
         store._put(key, json.dumps(diff, indent=2))

@@ -78,18 +78,14 @@ def run_crawl(
         cap_cfg.name: {} for cap_cfg in config.capabilities
     }
     crashes: dict[str, str] = {}
-    units = [
-        (cap_cfg, role) for cap_cfg in config.capabilities for role in cap_cfg.roles
-    ]
+    units = [(cap_cfg, role) for cap_cfg in config.capabilities for role in cap_cfg.roles]
     concurrency = max(1, config.walk_concurrency)
     if concurrency == 1:
         results = [_walk_unit(config, cap_cfg, role) for cap_cfg, role in units]
     else:
         log.info("crawl.parallel.start", workers=concurrency, units=len(units))
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            results = list(
-                pool.map(lambda u: _walk_unit(config, u[0], u[1]), units)
-            )
+            results = list(pool.map(lambda u: _walk_unit(config, u[0], u[1]), units))
     for cap_name, role, walk, crash in results:
         label = f"{cap_name}/{role}"
         if crash is not None:
@@ -136,6 +132,7 @@ def run_crawl(
     pack = FeaturePack(
         manifest=FeaturePackManifest(
             customer_id=customer_id,
+            product_id=config.product_id,
             snapshot_version=snapshot_version,
             generated_at=datetime.now(timezone.utc),
             capabilities=[c.name for c in capabilities],
@@ -157,8 +154,8 @@ def run_crawl(
     # primitive; deferred, see issue #22.)
     diff = _diff_against_prior(store, customer_id, snapshot_version, pack)
     uri = store.write_pack(pack)
-    write_diff(store, customer_id, snapshot_version, diff)
-    publish_latest(store, customer_id, snapshot_version)
+    write_diff(store, customer_id, snapshot_version, diff, product_id=config.product_id)
+    publish_latest(store, customer_id, snapshot_version, product_id=config.product_id)
 
     log.info("crawl.done", customer_id=customer_id, snapshot=snapshot_version, uri=uri)
     return uri
@@ -177,9 +174,7 @@ def _evaluate_honesty(
             for walk in walks_by_capability.get(cap_cfg.name, {}).values()
             for obs in walk.observations
         }
-        coverage.append(
-            evaluate_coverage(cap_cfg.name, cap_cfg.entry_points, observed_routes)
-        )
+        coverage.append(evaluate_coverage(cap_cfg.name, cap_cfg.entry_points, observed_routes))
     determinism = _determinism_rewalk(config, walks_by_capability, crashes)
     return HonestyVerdict(coverage=coverage, determinism=determinism, crashes=crashes)
 
