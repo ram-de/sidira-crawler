@@ -96,6 +96,44 @@ def test_build_rejects_incomplete_payload(mutate: dict, needle: str) -> None:
         build_customer_config(_payload(**mutate), customer_id="org_123")
 
 
+# ── product_id extraction + validation (sidira-simulator #215/#245) ─────────
+
+
+def test_build_extracts_explicit_product_id() -> None:
+    config = build_customer_config(_payload(product_id="growth-v2"), customer_id="org_123")
+    assert config.product_id == "growth-v2"
+
+
+def test_build_defaults_product_id_when_absent() -> None:
+    payload = _payload()
+    del payload["product_id"]
+    config = build_customer_config(payload, customer_id="org_123")
+    assert config.product_id == "default"
+
+
+def test_build_defaults_product_id_when_empty() -> None:
+    config = build_customer_config(_payload(product_id=""), customer_id="org_123")
+    assert config.product_id == "default"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "../evil",  # path traversal
+        "a/b",  # path separator
+        "has space",  # whitespace
+        "..",  # bare traversal
+        "UPPER",  # uppercase not in slug grammar
+        "-leading",  # leading dash
+        "x" * 65,  # too long
+        "   ",  # whitespace-only → empty after strip → rejected
+    ],
+)
+def test_build_rejects_unsafe_product_id(bad: str) -> None:
+    with pytest.raises(ValueError, match="product_id"):
+        build_customer_config(_payload(product_id=bad), customer_id="org_123")
+
+
 # ── apply_pulled_credentials ───────────────────────────────────────────────
 
 
@@ -157,6 +195,25 @@ def test_run_dispatch_invokes_run_crawl(monkeypatch: pytest.MonkeyPatch) -> None
     assert captured["snapshot_version"] == "2026-W24"
     assert captured["config"].sandbox_base_url == "https://sandbox.example.com"
     assert "Pack written to: r2://pack" in result.output
+
+
+def test_run_dispatch_threads_product_id_onto_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake_run_crawl(*, customer_id, snapshot_version, config):
+        captured["config"] = config
+        return "r2://pack"
+
+    monkeypatch.setattr(cli_module, "run_crawl", fake_run_crawl)
+    monkeypatch.setenv("CONFIG_JSON", json.dumps(_payload(product_id="growth-v2")))
+    monkeypatch.setenv(CREDENTIALS_ENV, _creds("admin", "viewer"))
+
+    result = CliRunner().invoke(
+        cli, ["run-dispatch", "--customer", "org_123", "--crawl-date", "2026-06-14"]
+    )
+    assert result.exit_code == 0, result.output
+    # product_id flows config_json -> CustomerConfig (-> manifest -> storage).
+    assert captured["config"].product_id == "growth-v2"
 
 
 def test_run_dispatch_explicit_snapshot_wins(monkeypatch: pytest.MonkeyPatch) -> None:

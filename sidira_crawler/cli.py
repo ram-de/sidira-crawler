@@ -161,23 +161,48 @@ def walk(
     help="Snapshot version tag (e.g. 2026-W24). Defaults to the ISO week of the walk's run_date.",
 )
 @click.option(
+    "--product-id",
+    default="default",
+    show_default=True,
+    help=(
+        "Crawl setup id (sidira-simulator #215/#245). 'default' keeps the legacy "
+        "customers/<id>/featurepacks path; any other value writes under "
+        "customers/<id>/setups/<product-id>/featurepacks so setups never collide."
+    ),
+)
+@click.option(
     "--out",
     "out_dir",
     default=None,
     type=click.Path(file_okay=False),
     help="Write the pack to this local directory instead of the env-selected store.",
 )
-def synthesize(raw_path: str, customer: str, snapshot: str | None, out_dir: str | None) -> None:
+def synthesize(
+    raw_path: str,
+    customer: str,
+    snapshot: str | None,
+    product_id: str,
+    out_dir: str | None,
+) -> None:
     """Synthesize a Feature Pack from a raw walk (Phase-3 capability synthesis)."""
     from sidira_crawler.llm import get_client
     from sidira_crawler.storage import (
         LocalArtifactStore,
         get_store,
         publish_latest,
+        validate_product_id,
         write_diff,
     )
     from sidira_crawler.synthesis.graph import load_raw_jsonl
     from sidira_crawler.synthesis.pack import synthesize_pack, weekly_bucket
+
+    # Reject an unsafe setup id up front (before any LLM spend) — the same
+    # R2-key-injection guard the dispatch path enforces. This is also enforced
+    # at the storage choke point, so even a bypass can't write a bad key.
+    try:
+        validate_product_id(product_id)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
     graph = load_raw_jsonl(raw_path)
     if snapshot is None:
@@ -185,7 +210,13 @@ def synthesize(raw_path: str, customer: str, snapshot: str | None, out_dir: str 
             raise click.UsageError("--snapshot is required when raw.jsonl has no run_date")
         snapshot = weekly_bucket(graph.run_date)
 
-    pack = synthesize_pack(graph, get_client(), customer_id=customer, snapshot_version=snapshot)
+    pack = synthesize_pack(
+        graph,
+        get_client(),
+        customer_id=customer,
+        snapshot_version=snapshot,
+        product_id=product_id,
+    )
 
     store = LocalArtifactStore(out_dir) if out_dir else get_store()
     uri = store.write_pack(pack)
@@ -200,8 +231,9 @@ def synthesize(raw_path: str, customer: str, snapshot: str | None, out_dir: str 
             "changes": [],
             "note": "diff implementation pending",
         },
+        product_id=product_id,
     )
-    publish_latest(store, customer, snapshot)
+    publish_latest(store, customer, snapshot, product_id=product_id)
     click.echo(
         f"Synthesized {len(pack.capabilities)} capabilities"
         f" ({', '.join(c.name for c in pack.capabilities)})"

@@ -55,6 +55,10 @@ on:
         description: "Non-secret saved crawl setup (JSON) from the simulator backend (sidira-simulator #206). Empty = streamly-sandbox mock acceptance path. For a real tenant it drives the production walk → honesty gate → synthesize → publish chain (#23)."
         required: false
         default: ""
+      product_id:
+        description: "Crawl setup id for the MOCK path's R2 prefix (sidira-simulator #215/#245). Empty = 'default' (legacy customers/<id>/featurepacks, byte-identical). The PRODUCTION path takes product_id from config_json, not this input."
+        required: false
+        default: ""
 
 run-name: "crawl ${{ inputs.crawl_id }} · ${{ inputs.customer }}"
 
@@ -359,9 +363,13 @@ jobs:
         env:
           CUSTOMER: ${{ inputs.customer }}
           SNAPSHOT: ${{ inputs.snapshot }}
+          # Crawl setup id (sidira-simulator #215/#245). Empty/unset = "default",
+          # which keeps the legacy customers/<id>/featurepacks path byte-identical.
+          PRODUCT_ID: ${{ inputs.product_id }}
         run: |
           args=(--raw raw.jsonl --customer "$CUSTOMER")
           [ -n "$SNAPSHOT" ] && args+=(--snapshot "$SNAPSHOT")
+          [ -n "$PRODUCT_ID" ] && args+=(--product-id "$PRODUCT_ID")
           python -m sidira_crawler.cli synthesize "${args[@]}"
 
       # Keep a copy as a workflow artifact for inspection without R2 access.
@@ -378,20 +386,25 @@ jobs:
         env:
           CUSTOMER: ${{ inputs.customer }}
           SNAPSHOT: ${{ inputs.snapshot }}
+          PRODUCT_ID: ${{ inputs.product_id }}
         run: |
           python - <<'EOF'
           import os
 
           import boto3
 
+          from sidira_crawler.storage import featurepacks_prefix
           from sidira_crawler.synthesis.graph import load_raw_jsonl
           from sidira_crawler.synthesis.pack import weekly_bucket
 
           # Re-synthesizing would double the LLM spend; mirror the
-          # just-written snapshot from R2 instead.
+          # just-written snapshot from R2 instead. Derive the prefix the same
+          # way storage.py did, so default stays byte-identical and a named
+          # setup mirrors its own customers/<id>/setups/<product_id>/... tree.
           graph = load_raw_jsonl("raw.jsonl")
           snapshot = os.environ["SNAPSHOT"] or weekly_bucket(graph.run_date)
-          prefix = f"customers/{os.environ['CUSTOMER']}/featurepacks/{snapshot}/"
+          product_id = os.environ.get("PRODUCT_ID") or "default"
+          prefix = f"{featurepacks_prefix(os.environ['CUSTOMER'], product_id)}/{snapshot}/"
           client = boto3.client(
               "s3",
               endpoint_url=os.environ["R2_ENDPOINT_URL"],

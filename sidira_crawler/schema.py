@@ -86,6 +86,14 @@ class FeaturePackManifest(BaseModel):
     """Top-level index for a weekly snapshot."""
 
     customer_id: str
+    #: Which crawl setup of the org this pack belongs to (sidira-simulator
+    #: #215/#245). ``"default"`` is the legacy single-setup org whose pack lives
+    #: at ``customers/<id>/featurepacks`` (byte-identical to pre-multi-setup
+    #: behavior); any other value records the setup so ``storage`` can derive the
+    #: per-setup ``customers/<id>/setups/<product_id>/featurepacks`` prefix.
+    #: Optional + back-compat: packs predating multi-setup omit it and default to
+    #: ``"default"``.
+    product_id: str = "default"
     snapshot_version: str
     generated_at: datetime
     schema_version: Literal["1.0"] = "1.0"

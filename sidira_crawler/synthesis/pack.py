@@ -36,11 +36,16 @@ def synthesize_pack(
     customer_id: str,
     snapshot_version: str,
     clusters: ClusterResult | None = None,
+    product_id: str = "default",
 ) -> FeaturePack:
     """Run the full Phase-3 synthesis over a merged screen graph.
 
     ``clusters`` may be supplied (the config-declared MVP path builds them
     from the customer config); when omitted they are discovered by the LLM.
+
+    ``product_id`` records which crawl setup of the org this pack belongs to
+    (sidira-simulator #215/#245); it rides onto the manifest so ``storage`` can
+    derive the per-setup path. ``"default"`` keeps the legacy single-setup path.
     """
     if clusters is None:
         log.info("synthesis.cluster.start", screens=len(graph.screens), edges=len(graph.edges))
@@ -74,6 +79,7 @@ def synthesize_pack(
 
     manifest = FeaturePackManifest(
         customer_id=customer_id,
+        product_id=product_id,
         snapshot_version=snapshot_version,
         generated_at=datetime.now(timezone.utc),
         capabilities=[c.name for c in capabilities],
