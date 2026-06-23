@@ -22,11 +22,14 @@ from sidira_crawler.schema import (
     FeaturePackManifest,
     ReverseFigma,
 )
+import pytest
+
 from sidira_crawler.storage import (
     LocalArtifactStore,
     _read_latest,
     featurepacks_prefix,
     publish_latest,
+    validate_product_id,
     write_diff,
 )
 
@@ -55,6 +58,29 @@ def _pack(product_id: str = "default", customer_id: str = "acme") -> FeaturePack
             )
         ],
     )
+
+
+# ── validate_product_id: the single R2-key-injection enforcement point ──────
+
+
+@pytest.mark.parametrize("good", ["default", "growth-v2", "a", "x_1", "x" * 64])
+def test_validate_product_id_accepts_safe(good: str) -> None:
+    assert validate_product_id(good) == good
+
+
+@pytest.mark.parametrize(
+    "bad", ["../evil", "a/b", "has space", "..", "UPPER", "-lead", "x" * 65, ""]
+)
+def test_validate_product_id_rejects_unsafe(bad: str) -> None:
+    with pytest.raises(ValueError, match="product_id"):
+        validate_product_id(bad)
+
+
+def test_featurepacks_prefix_rejects_injection() -> None:
+    # The choke point itself refuses to build a key from an unsafe id, so even a
+    # caller that bypassed the dispatch validator cannot write an escaping key.
+    with pytest.raises(ValueError, match="product_id"):
+        featurepacks_prefix("acme", "../../etc/passwd")
 
 
 # ── featurepacks_prefix: the exact contract strings ────────────────────────
@@ -248,3 +274,32 @@ def test_synthesize_cli_threads_product_id(tmp_path: Path, monkeypatch) -> None:
     assert (setup_base / "latest").read_text() == "2026-W21"
     # The legacy default path must be untouched.
     assert not (out_dir / "customers" / "acme" / "featurepacks").exists()
+
+
+def test_synthesize_cli_rejects_unsafe_product_id(tmp_path: Path) -> None:
+    from click.testing import CliRunner
+
+    from sidira_crawler.cli import cli
+
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text("{}\n")
+    result = CliRunner().invoke(
+        cli,
+        [
+            "synthesize",
+            "--raw",
+            str(raw),
+            "--customer",
+            "acme",
+            "--snapshot",
+            "2026-W21",
+            "--product-id",
+            "../evil",
+            "--out",
+            str(tmp_path / "out"),
+        ],
+    )
+    # Rejected up front (no LLM call, no write) with a clean usage error.
+    assert result.exit_code != 0
+    assert "product_id" in result.output
+    assert not (tmp_path / "out").exists()

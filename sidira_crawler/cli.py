@@ -190,10 +190,19 @@ def synthesize(
         LocalArtifactStore,
         get_store,
         publish_latest,
+        validate_product_id,
         write_diff,
     )
     from sidira_crawler.synthesis.graph import load_raw_jsonl
     from sidira_crawler.synthesis.pack import synthesize_pack, weekly_bucket
+
+    # Reject an unsafe setup id up front (before any LLM spend) — the same
+    # R2-key-injection guard the dispatch path enforces. This is also enforced
+    # at the storage choke point, so even a bypass can't write a bad key.
+    try:
+        validate_product_id(product_id)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
     graph = load_raw_jsonl(raw_path)
     if snapshot is None:

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Protocol
 
@@ -32,6 +33,32 @@ import structlog
 from sidira_crawler.schema import FeaturePack
 
 log = structlog.get_logger()
+
+# A crawl setup id (``product_id``) becomes a path segment in the R2 key
+# ``customers/<id>/setups/<product_id>/featurepacks/...``. Constrain it to a safe
+# slug — lowercase alphanumerics plus ``-``/``_``, bounded length — so it can
+# never inject a path separator (``/``), traverse (``..``), or smuggle
+# whitespace into an object key. ``"default"`` is the legacy single-setup value
+# and is allowed as a special case (it produces the byte-identical legacy path).
+_PRODUCT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def validate_product_id(product_id: str) -> str:
+    """Return ``product_id`` if it is a safe R2-key slug, else raise ValueError.
+
+    ``"default"`` is always accepted (legacy single-setup). Every other value
+    must match :data:`_PRODUCT_ID_RE`. This is the single enforcement point for
+    the slug invariant: :func:`featurepacks_prefix` calls it, so NO key can be
+    built from an unsafe id regardless of which entry point (dispatch, manual
+    CLI, mock workflow) supplied it. The simulator's dispatch adapter reuses
+    this so the producer and the dispatch validator can never drift.
+    """
+    if product_id == "default" or _PRODUCT_ID_RE.match(product_id):
+        return product_id
+    raise ValueError(
+        f"invalid product_id {product_id!r} — must be a lowercase slug "
+        "([a-z0-9][a-z0-9_-]{0,63}); no '/', '..', or spaces"
+    )
 
 
 def featurepacks_prefix(customer_id: str, product_id: str = "default") -> str:
@@ -47,10 +74,14 @@ def featurepacks_prefix(customer_id: str, product_id: str = "default") -> str:
     * any other ``product_id`` → ``customers/<id>/setups/<product_id>/featurepacks``
       so two crawl setups of one org never collide.
 
-    Every path-building site in this module routes through here, which is what
-    keeps a named setup's ``latest`` pointer (and its publish/skip-regression
-    logic) independent of the default setup's pointer.
+    ``product_id`` is validated here (:func:`validate_product_id`) so this choke
+    point can never emit a key containing ``/``, ``..``, or whitespace — even if
+    a caller bypassed the dispatch validator. Every path-building site in this
+    module routes through here, which is what keeps a named setup's ``latest``
+    pointer (and its publish/skip-regression logic) independent of the default
+    setup's pointer.
     """
+    validate_product_id(product_id)
     if product_id == "default":
         return f"customers/{customer_id}/featurepacks"
     return f"customers/{customer_id}/setups/{product_id}/featurepacks"
